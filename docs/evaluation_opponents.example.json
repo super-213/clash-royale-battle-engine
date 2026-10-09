@@ -1,0 +1,8 @@
+{
+  "opponents": {
+    "legacy_v5": {
+      "path": "../artifacts/training_runs/20260928_155631_native_hybrid_ppo/interrupted_model.zip",
+      "algorithm": "native_engine.native_recurrent_model:NativeWorldModelPPO"
+    }
+  }
+}

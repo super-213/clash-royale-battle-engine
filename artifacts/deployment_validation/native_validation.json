@@ -1,0 +1,71 @@
+{
+  "rules": "standard_1v1_dynamic_v1",
+  "states": {
+    "0:base": {
+      "tested": 576,
+      "allowed": 222
+    },
+    "0:0": {
+      "tested": 576,
+      "allowed": 259
+    },
+    "0:1": {
+      "tested": 576,
+      "allowed": 259
+    },
+    "0:0,1": {
+      "tested": 576,
+      "allowed": 296
+    },
+    "1:base": {
+      "tested": 576,
+      "allowed": 222
+    },
+    "1:0": {
+      "tested": 576,
+      "allowed": 259
+    },
+    "1:1": {
+      "tested": 576,
+      "allowed": 259
+    },
+    "1:0,1": {
+      "tested": 576,
+      "allowed": 296
+    }
+  },
+  "mismatches": [],
+  "fixture": "detached tower HP reduced to 1; normal spell performs native destruction",
+  "validated_at": "2026-10-09T10:02:23.955040+08:00",
+  "total_grid_checks": 4608,
+  "unit_tests_passed": 35,
+  "engine": {
+    "schema": "firstlight-offline-engine.v1",
+    "package": "nullsroyale.rel.free",
+    "apk_version": "15.535.13",
+    "apk_version_code": 150535013,
+    "abi": "arm64-v8a",
+    "apk_sha256": "685c115ee432d5fd2d7be856a58ea0cb029c9c187aa9061f3cd250994dfbcf2a",
+    "libg_sha256": "110aa2b5cac391c498645e072b0d88729428c2c2845e7e2737ca8ee979059783",
+    "resource_directory": "nr_15.535.13_release_ff1c6c29",
+    "runtime_content_version": "15.535.86",
+    "runtime_fingerprint_sha256": "e0cb2fb9eb2fdd0df1afcb00df3e3ba61cf25aa8b24e39c17cc391d952a4e339"
+  },
+  "source_sha256": {
+    "native_vec_env.py": "d48d6c8ce4e149cc51f0470e8626919d98e9d26a5299a10a7ac954ad796c2e4f",
+    "tests/test_native_vec_env.py": "266f493de9235039bc7655c66e918fd0765ae43645f9c48597b1a0db43e2582f",
+    "training_runtime.py": "84cfe8f88e9f919f4621096fa9480d5c05630f3269db69fb5f7542414c2a61dd"
+  },
+  "additional_checks": {
+    "spell_corners_and_river": 20,
+    "own_destroyed_tower_points": 10,
+    "all_six_troops_rear_boundary": 12
+  },
+  "batch_smoke": {
+    "battles": 16,
+    "vector_steps": 512,
+    "decisions": 8192,
+    "completed_episodes": 15,
+    "passed": true
+  }
+}

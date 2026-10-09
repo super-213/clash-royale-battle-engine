@@ -1,0 +1,4 @@
+stable-baselines3==2.9.0
+sb3-contrib==2.9.0
+tensorboard
+frida==17.17.0

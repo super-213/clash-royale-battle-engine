@@ -7,6 +7,7 @@ from pathlib import Path, PurePosixPath
 import shutil
 import socket
 import subprocess
+import threading
 import time
 
 
@@ -98,6 +99,92 @@ def wait_until_ready(port, timeout):
     raise RuntimeError(f"battle engine did not become ready: {last_error or 'content is not ready'}")
 
 
+def inject_probe(adb, serial, directory, pid):
+    """Load the installed probe when a cold game process has not loaded it yet."""
+    try:
+        import frida
+    except ImportError as error:
+        raise RuntimeError("probe injection requires the Python frida package") from error
+
+    server_result = shell(adb, serial, "ls", "/data/local/tmp/frida-server-*", check=False)
+    servers = server_result.stdout.splitlines()
+    if server_result.returncode or not servers:
+        raise RuntimeError("frida-server is missing from /data/local/tmp")
+    server = servers[0].strip()
+    if shell(adb, serial, "pidof", PurePosixPath(server).name, check=False).returncode:
+        command(adb, serial, "shell", f"{server} -D >/dev/null 2>&1 </dev/null &")
+
+    local_port = command(adb, serial, "forward", "tcp:0", "tcp:27042").stdout.strip()
+    if not local_port.isdigit():
+        raise RuntimeError(f"adb did not allocate a Frida port: {local_port!r}")
+    library_dir = str(directory / "lib/arm64")
+    source = f"""
+const libdir = {json.dumps(library_dir)};
+const dlopen = new NativeFunction(Module.getGlobalExportByName('dlopen'), 'pointer', ['pointer', 'int']);
+const dlsym = new NativeFunction(Module.getGlobalExportByName('dlsym'), 'pointer', ['pointer', 'pointer']);
+const cpp = dlopen(Memory.allocUtf8String(libdir + '/libc++_shared.so'), 0x102);
+if (cpp.isNull()) throw Error('libc++_shared.so dlopen failed');
+const probe = dlopen(Memory.allocUtf8String(libdir + '/libcrprobe.so'), 0x102);
+if (probe.isNull()) throw Error('libcrprobe.so dlopen failed');
+const entry = dlsym(probe, Memory.allocUtf8String('JNI_OnLoad'));
+if (entry.isNull()) throw Error('JNI_OnLoad not found');
+const getVms = new NativeFunction(Module.getGlobalExportByName('JNI_GetCreatedJavaVMs'), 'int', ['pointer', 'int', 'pointer']);
+const vmOut = Memory.alloc(Process.pointerSize);
+const count = Memory.alloc(4);
+const rc = getVms(vmOut, 1, count);
+if (rc !== 0 || count.readU32() < 1) throw Error('JavaVM unavailable: ' + rc);
+const onload = new NativeFunction(entry, 'int', ['pointer', 'pointer']);
+send({{version: onload(vmOut.readPointer(), ptr(0)), pid: Process.id}});
+"""
+    try:
+        device = frida.get_device_manager().add_remote_device(f"127.0.0.1:{local_port}")
+        session = device.attach(int(pid))
+        try:
+            result = []
+            received = threading.Event()
+
+            def on_message(message, _data):
+                result.append(message)
+                received.set()
+
+            script = session.create_script(source)
+            script.on("message", on_message)
+            script.load()
+            if not received.wait(10):
+                raise RuntimeError("Frida probe injection timed out")
+            message = result[0]
+            if message.get("type") != "send":
+                raise RuntimeError(f"Frida probe injection failed: {message}")
+            print(f"Injected native probe into pid={pid}: {message['payload']}")
+        finally:
+            session.detach()
+    finally:
+        command(adb, serial, "forward", "--remove", f"tcp:{local_port}", check=False)
+
+
+def ensure_engine_ready(adb, serial, directory, port, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            status = read_status(port)
+            if status.get("contentReady"):
+                return status
+        except (ConnectionError, OSError, ValueError):
+            pass
+
+        pids = shell(adb, serial, "pidof", PACKAGE, check=False).stdout.split()
+        if pids:
+            pid = pids[0]
+            maps = shell(adb, serial, "cat", f"/proc/{pid}/maps", check=False).stdout
+            if "libcrprobe.so" in maps:
+                return wait_until_ready(port, max(1, deadline - time.monotonic()))
+            if "libg.so" in maps:
+                inject_probe(adb, serial, directory, pid)
+                return wait_until_ready(port, max(1, deadline - time.monotonic()))
+        time.sleep(0.5)
+    raise RuntimeError("game process did not load libg.so before the bootstrap timeout")
+
+
 def verify_engine(adb, serial, directory, repository):
     if shell(adb, serial, "ls", directory / "lib/arm64/libcrprobe.so", check=False).returncode:
         raise RuntimeError("libcrprobe.so is missing; install the prepared APK before bootstrapping")
@@ -134,7 +221,9 @@ def main():
     command(adb, arguments.serial, "forward", f"tcp:{arguments.port}", f"tcp:{DEVICE_PORT}")
     shell(adb, arguments.serial, "am", "start", "-n", ACTIVITY)
 
-    status = wait_until_ready(arguments.port, arguments.timeout)
+    status = ensure_engine_ready(
+        adb, arguments.serial, directory, arguments.port, arguments.timeout
+    )
     print(f"Battle engine ready at 127.0.0.1:{arguments.port}")
     print(f"device={arguments.serial} uid={uid} mode={status.get('mode')}")
 

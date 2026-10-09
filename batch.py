@@ -90,14 +90,50 @@ class Batch:
         self.connection = None
         self.sequence = 1
         self.last_receipts = tuple(() for _ in range(battles))
+        self.states = tuple(None for _ in range(battles))
 
     def reset(self, seed=1):
         self.close()
-        self._configure(seed)
+        slots = tuple(range(self.battles))
+        seeds = tuple(seed + battle for battle in slots)
+        self._configure_slots(slots, seeds)
         self._open()
         states = self._advance(90, ())  # first playable boundary, as Engine.reset
         self.last_receipts = tuple(() for _ in range(self.battles))
         return states
+
+    def reset_slots(self, slots, seeds):
+        """Reset selected battles without advancing the surviving slots.
+
+        The resident control server owns one connection at a time, so the
+        binary data plane is briefly closed while the selected managers are
+        reconstructed and advanced to tick 90.  A capture-only batch frame
+        (zero ticks, zero actions) then obtains their compact observations.
+        """
+        slots = tuple(int(slot) for slot in slots)
+        seeds = tuple(int(seed) for seed in seeds)
+        if not slots:
+            return ()
+        if len(slots) != len(seeds):
+            raise ValueError('slots and seeds must have the same length')
+        if len(set(slots)) != len(slots):
+            raise ValueError('slots must be unique')
+        if any(slot < 0 or slot >= self.battles for slot in slots):
+            raise ValueError(f'slots must be between 0 and {self.battles - 1}')
+        if not self.connection or any(state is None for state in self.states):
+            raise RuntimeError('reset the batch before resetting individual slots')
+
+        self.close()
+        self._configure_slots(slots, seeds, advance=90)
+        self._open()
+        refreshed = self._exchange(
+            tuple((slot, (), 0) for slot in slots)
+        )
+        receipts = list(self.last_receipts)
+        for slot in slots:
+            receipts[slot] = ()
+        self.last_receipts = tuple(receipts)
+        return refreshed
 
     def step(self, actions=(), ticks=5):
         return self._advance(ticks, actions)
@@ -107,20 +143,27 @@ class Batch:
             self.connection.close()
         self.connection = None
 
-    def _configure(self, seed):
+    def _configure_slots(self, slots, seeds, advance=0):
         match = json.loads(Path(__file__).with_name('standard_match.json').read_text())
         with socket.create_connection(self.address, timeout=self.timeout) as sock:
             with sock.makefile('rb') as session:
                 sock.sendall(b'session-v1\n')
                 if not self._read(session).get('ok'):
                     raise RuntimeError('control session rejected')
-                for battle in range(self.battles):
-                    match['rndSeed'] = seed + battle
+                for battle, seed in zip(slots, seeds):
+                    match['rndSeed'] = seed
                     config = json.dumps(match, separators=(',', ':'))
                     sock.sendall(f'env {battle} configure {config}\n'.encode())
                     reply = self._read(session)
                     if not reply.get('ok'):
                         raise RuntimeError(f'battle {battle} configure failed: {reply}')
+                    if advance:
+                        sock.sendall(f'env {battle} step {advance}\n'.encode())
+                        reply = self._read(session)
+                        if not reply.get('ok'):
+                            raise RuntimeError(
+                                f'battle {battle} initial advance failed: {reply}'
+                            )
 
     def _read(self, session):
         line = session.readline()
@@ -150,21 +193,43 @@ class Batch:
             raise ValueError(f'expected {self.battles} action groups, got {len(groups)}')
         if any(len(group) > MAX_ACTIONS for group in groups):
             raise ValueError(f'each battle accepts at most {MAX_ACTIONS} actions')
-        header = HEADER.pack(b'CRBQ', VERSION, 0, self.sequence, self.battles)
+        return self._exchange(tuple(
+            (battle, plays, ticks) for battle, plays in enumerate(groups)
+        ))
+
+    def _exchange(self, entries):
+        if not self.connection:
+            raise RuntimeError('reset the batch before using the data plane')
+        if not entries or len(entries) > self.battles:
+            raise ValueError(f'expected between 1 and {self.battles} batch entries')
+        slots = tuple(entry[0] for entry in entries)
+        if len(set(slots)) != len(slots):
+            raise ValueError('batch entry slots must be unique')
+        for slot, plays, ticks in entries:
+            if not 0 <= slot < self.battles:
+                raise ValueError(f'battle slot {slot} is out of range')
+            if not 0 <= ticks <= 1_000_000:
+                raise ValueError('ticks must be between 0 and 1,000,000')
+            if ticks == 0 and plays:
+                raise ValueError('capture-only entries cannot contain actions')
+            if len(plays) > MAX_ACTIONS:
+                raise ValueError(f'each battle accepts at most {MAX_ACTIONS} actions')
+
+        header = HEADER.pack(b'CRBQ', VERSION, 0, self.sequence, len(entries))
         body = bytearray()
-        for battle, plays in enumerate(groups):
+        for battle, plays, ticks in entries:
             body += REQUEST_ENTRY.pack(battle, len(plays), ticks)
             for play in plays:
                 body += _encode_play(play)
         try:
             self.connection.sendall(header + body)
             response = HEADER.unpack(_receive(self.connection, HEADER.size))
-            expected = (b'CRBS', VERSION, 0, self.sequence, self.battles)
+            expected = (b'CRBS', VERSION, 0, self.sequence, len(entries))
             if response != expected:
                 raise RuntimeError(f'batch response header mismatch: {response!r}')
             states = []
             all_receipts = []
-            for expected_slot in range(self.battles):
+            for expected_slot in slots:
                 slot, status, count, flags, size = RESPONSE_ENTRY.unpack(
                     _receive(self.connection, RESPONSE_ENTRY.size))
                 if slot != expected_slot or count > MAX_ACTIONS or flags or size > MAX_PAYLOAD:
@@ -179,7 +244,13 @@ class Batch:
                 states.append(State.decode(payload))
                 all_receipts.append(receipts)
             self.sequence += 1
-            self.last_receipts = tuple(all_receipts)
+            current_states = list(self.states)
+            current_receipts = list(self.last_receipts)
+            for slot, state, receipts in zip(slots, states, all_receipts):
+                current_states[slot] = state
+                current_receipts[slot] = receipts
+            self.states = tuple(current_states)
+            self.last_receipts = tuple(current_receipts)
             return tuple(states)
         except Exception:
             self.close()

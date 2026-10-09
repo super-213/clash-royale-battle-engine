@@ -1476,7 +1476,14 @@ void handle_resident_batch_session(int socket_fd, bool training_capture = false,
       ticks[index] = resident_read_le<std::uint32_t>(entry + 4);
       const bool slot_valid = resident_slot_id_valid(slot_ids[index]) && g_resident_slots[slot_ids[index]].occupied &&
                               !seen[slot_ids[index]];
-      if (!slot_valid || action_counts[index] > kMaxTransitionActions || ticks[index] == 0 || ticks[index] > 1000000U) {
+      // A zero-tick entry with no actions is a capture-only request.  It lets
+      // the host reconfigure and advance one finished resident slot through
+      // the control plane, reopen this data plane, and fetch only that slot's
+      // first playable observation without advancing the surviving matches.
+      // Existing positive-tick batch frames keep their original semantics.
+      const bool capture_only = ticks[index] == 0 && action_counts[index] == 0;
+      if (!slot_valid || action_counts[index] > kMaxTransitionActions || ticks[index] > 1000000U ||
+          (ticks[index] == 0 && !capture_only)) {
         valid = false;
         break;
       }
@@ -1556,7 +1563,7 @@ void handle_resident_batch_session(int socket_fd, bool training_capture = false,
         }
         receipt.status = succeeded ? 0 : 1;
       }
-      if (succeeded) {
+      if (succeeded && ticks[index] != 0) {
         succeeded = resident_step_bound(slot, ticks[index]);
       }
       char *payload = primary_payload.get();
