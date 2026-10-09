@@ -1,0 +1,75 @@
+{
+  "prepared_date": "2026-10-09",
+  "timezone": "Asia/Shanghai",
+  "git_head": "89a08e5d8888d013cf32004741d21b4f42421948",
+  "paper_scope": "Methods and experiment design only; no empirical battle results",
+  "architecture": "action_conditioned_world_model_stateful_v6",
+  "verification_environment": {
+    "python": "3.11.16",
+    "torch": "2.13.0",
+    "stable_baselines3": "2.9.0",
+    "sb3_contrib": "2.9.0",
+    "gymnasium": "1.3.0"
+  },
+  "static_trainable_parameter_counts": {
+    "full_v6": 1824036,
+    "no_aux_v6": 1824036,
+    "state_only_v5": 1789092,
+    "v4": 1726468
+  },
+  "experiment_plan": {
+    "training_seeds": [
+      0,
+      1,
+      2
+    ],
+    "variants": [
+      "full",
+      "no_aux",
+      "state_only",
+      "v4"
+    ],
+    "learner_decisions_per_run": 819200,
+    "dev_seed_base": 900001,
+    "dev_seed_count": 16,
+    "test_seed_base": 1900001,
+    "test_seed_count": 64,
+    "opponents": [
+      "random",
+      "legacy_v5"
+    ]
+  },
+  "source_sha256": {
+    "native_vec_env.py": "7ab1e963fe5a2fb7e27e4277eed6b23d93b492b9ede5ead94fb63121751ab013",
+    "native_model.py": "49c7516ba69973f7f3e86ecda6afe58eee583257f4fc65286145befbb753caf3",
+    "native_cross_modal.py": "b7d569ea1fc9c4bf01808f8b773f3525581e92b10999e435e8491e1304892b9c",
+    "native_spatial_model.py": "a3320bb6b2e7b6cb91856c2fd3db56f9470f18924f7bd2925d772f89dfb9ae48",
+    "native_world_model.py": "ea61c6879ec2dfef7ce476b62db9e29c70d07895909f417f6e4179b3a305ebf8",
+    "native_recurrent_model.py": "9dbd0d08a7e1dbb1cc45d3551475fcbe991ce599e3349b966d6e2ef57d5c31e0",
+    "protocol.py": "19b6c833afb7dce5f0954d0a0a281da4c78ccdefdc0d209cf74d421da1a798f2",
+    "batch.py": "ca1f6ce5d1f0560524df90e51e1557c4d35c126b6b25eff1463851f5e5fc619d",
+    "self_play.py": "328d2fa3a2b15ca6bca31c17591fc2281eddbe885e57c571ba6ac93540c6683b",
+    "fixed_evaluation.py": "4a0d75b0a943284adf36fa13d242c9c8d6efa624d1007626b869cc85b69d2b2e",
+    "training_runtime.py": "cf4b0e945327b3024851d7c327da8ca5ee605bea639a448fe1acd11a48c490ba",
+    "training_experiments.py": "5dc5be9693b27b847aaea872978e6bf61dfa9482d2a4ca93684825218d85aa8f",
+    "train_native.py": "3d79c6405e6632c6da438263f74a8bed98f68437d5c4c2d01721e6366a37d0bb",
+    "training_profiles/native_hybrid_ppo.json": "4909775f63fb417130399faba9a203c2a626f8462a657fdecc357a415b992d4d",
+    "standard_match.json": "3b3c8c53e68127fae52a1997ce8a7270bd25eb9ff05b24cd6709122820e844ad",
+    "requirements-training.txt": "cb786c2e321cfa70264bd2c1cefc18ca4021e967102d07b3413edcd646ad2c26",
+    "vendor/firstlight/probe/minimal_capture.inc": "8cacb5d7f80c2a09b2ad29b98f64ad6d878f760555bc74f94e4c458108b2b347",
+    "vendor/firstlight/NOTICE": "1d304a6d3243fd6629e2127903729eba05f930669a9e318a674ad62b90cf43ba",
+    "artifacts/experiments/20261009_mirror_v6/plan.json": "92e39388c32b8f1c9d6b2951a5ba937c822c31d02ff5c7c8541cfbf5edab5f13"
+  },
+  "primary_reference_urls": [
+    "https://arxiv.org/abs/1707.06347",
+    "https://arxiv.org/abs/1506.02438",
+    "https://doi.org/10.1162/neco.1997.9.8.1735",
+    "https://sb3-contrib.readthedocs.io/en/master/modules/ppo_recurrent.html",
+    "https://arxiv.org/abs/1512.03385",
+    "https://arxiv.org/abs/1803.08494",
+    "https://arxiv.org/abs/1706.03762",
+    "https://arxiv.org/abs/2006.14171",
+    "https://arxiv.org/abs/1611.05397",
+    "https://arxiv.org/abs/1912.01603"
+  ]
+}
