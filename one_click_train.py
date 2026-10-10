@@ -14,7 +14,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from training_runtime import _atomic_json, load_object, utc_now
+from training_runtime import _atomic_json, load_object, utc_now, resume_directory
 
 
 ROOT = Path(__file__).resolve().parent
@@ -239,6 +239,12 @@ def prepare_config(profile, defaults_only=False):
 
 
 def validate_config(config):
+    if int(config["rounds"]) <= 0 or not 1 <= int(config["battles"]) <= 16:
+        raise ValueError("rounds must be positive and battles must be between 1 and 16")
+    if int(config["batch_size"]) <= 1 or int(config["checkpoint_every_rounds"]) <= 0:
+        raise ValueError("batch_size must exceed one and checkpoint interval must be positive")
+    if config.get("evaluation_port") is not None and not 1 <= int(config["evaluation_port"]) <= 65535:
+        raise ValueError("evaluation_port must be between 1 and 65535")
     if int(config["rollout_decisions"]) % int(config["battles"]):
         raise ValueError("并行战斗数量必须能整除每轮决策总数")
     rollout_steps = int(config["rollout_decisions"]) // int(config["battles"])
@@ -372,6 +378,8 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true", help="write and validate config without training")
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     parser.add_argument("--experiment-suite", type=Path, help="execute a saved equal-budget experiment plan")
+    parser.add_argument("--resume", type=Path, help="resume an updated checkpoint with its .zip.state bundle")
+    parser.add_argument("--rounds", type=int, help="target total PPO rounds, including completed rounds")
     arguments = parser.parse_args(argv)
     if arguments.experiment_suite:
         from training_experiments import run_suite
@@ -385,6 +393,14 @@ def main(argv=None):
         ensure_engine(plan["runs"][0]["config"])
         result = run_suite(arguments.experiment_suite)
         return 0 if result["valid"] else 2
+    if arguments.resume:
+        checkpoint = arguments.resume.resolve()
+        config = json.loads((resume_directory(checkpoint) / "config.json").read_text())
+        config["resume_from"] = str(checkpoint)
+        config["run_name"] = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_resumed"
+        if arguments.rounds is not None:
+            config["rounds"] = arguments.rounds
+        return launch_config(config, arguments)
     profiles = load_profiles()
     if arguments.profile:
         matches = [profile for profile in profiles if profile["profile_id"] == arguments.profile]
@@ -396,6 +412,12 @@ def main(argv=None):
     else:
         profile = choose_profile(profiles)
     config = prepare_config(profile, defaults_only=arguments.defaults)
+    if arguments.rounds is not None:
+        config["rounds"] = arguments.rounds
+    return launch_config(config, arguments)
+
+
+def launch_config(config, arguments):
     validate_config(config)
     run_dir = unique_run_dir(arguments.runs_dir, config["run_name"])
     print_plan(config, run_dir)

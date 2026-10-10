@@ -48,7 +48,7 @@ class NativeCrossModalExtractor(BaseFeaturesExtractor):
         if cross_dim % attention_heads:
             raise ValueError("cross_dim must be divisible by attention_heads")
         self.battle_backend = "native_batch_v1"
-        self.observation_schema = "native_model_v2"
+        self.observation_schema = "native_model_v3"
         self.architecture_version = "cross_modal_stateful_v3"
         self.cross_dim = int(cross_dim)
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import shutil
 import time
 from collections import OrderedDict, defaultdict, deque
 from pathlib import Path
@@ -12,6 +13,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from stable_baselines3.common.callbacks import BaseCallback
+from fixed_evaluation import preserve_random_state
 
 
 def _timestamp():
@@ -237,7 +239,8 @@ class SelfPlayOpponentPool:
             self._loaded_models[snapshot_id] = model
             return model
         entry = self._snapshot_entry(snapshot_id)
-        model = self.algorithm_class.load(entry["path"], device=self.device)
+        with preserve_random_state():
+            model = self.algorithm_class.load(entry["path"], device=self.device)
         self._loaded_models[snapshot_id] = model
         while len(self._loaded_models) > self.loaded_model_limit:
             removable = next(
@@ -417,6 +420,44 @@ class SelfPlayOpponentPool:
             "matches": str(self.matches_path),
             "ratings": str(self.ratings_path),
         }
+
+    def save_state(self, directory):
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        snapshots = []
+        for entry in self.snapshots:
+            filename = f"{entry['id']}.zip"
+            shutil.copyfile(entry["path"], directory / filename)
+            snapshots.append({**entry, "path": filename})
+        _atomic_json(directory / "state.json", {
+            "snapshots": snapshots, "ratings": self.ratings,
+            "learner_elo": self.learner_elo, "learner_generation": self.learner_generation,
+            "aggregate": self.aggregate, "recent_results": list(self.recent_results),
+            "matchups": [[*key, value] for key, value in self.matchups.items()],
+            "rng": self.rng.bit_generator.state,
+        })
+
+    def restore_state(self, directory):
+        directory = Path(directory)
+        saved = json.loads((directory / "state.json").read_text())
+        self.snapshots = []
+        for entry in saved["snapshots"]:
+            source = directory / entry["path"]
+            destination = self.snapshots_dir / source.name
+            shutil.copyfile(source, destination)
+            self.snapshots.append({**entry, "path": str(destination.resolve())})
+        self.ratings = saved["ratings"]
+        self.learner_elo = saved["learner_elo"]
+        self.learner_generation = saved["learner_generation"]
+        self.aggregate = saved["aggregate"]
+        self.recent_results = deque(saved["recent_results"], maxlen=100)
+        self.matchups.clear()
+        self.matchups.update({(learner, opponent): values
+                             for learner, opponent, values in saved["matchups"]})
+        self.rng.bit_generator.state = saved["rng"]
+        # Native episodes cannot be restored: resumed slots start new games.
+        self.assignments.clear()
+        self._persist()
 
     def _persist(self):
         active_ids = {item["id"] for item in self._active_snapshots()}

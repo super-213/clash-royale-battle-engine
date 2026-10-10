@@ -232,7 +232,7 @@ class TrainingRuntimeTest(unittest.TestCase):
         ]
         with TemporaryDirectory() as directory:
             paths = generate_charts(directory, records)
-            self.assertEqual(len(paths), 6)
+            self.assertEqual(len(paths), 7)
             for path in paths:
                 content = path.read_text()
                 self.assertIn("<svg", content)

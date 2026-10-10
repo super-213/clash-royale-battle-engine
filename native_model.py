@@ -89,7 +89,7 @@ class NativeHybridExtractor(BaseFeaturesExtractor):
     ):
         super().__init__(observation_space, features_dim=int(features_dim))
         self.battle_backend = "native_batch_v1"
-        self.observation_schema = "native_model_v2"
+        self.observation_schema = "native_model_v3"
         self.architecture_version = "cnn_entity_transformer_event_lstm_v2"
         if entity_dim % entity_heads:
             raise ValueError("entity_dim must be divisible by entity_heads")

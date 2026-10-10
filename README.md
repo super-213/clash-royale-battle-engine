@@ -14,7 +14,7 @@ head 拆分；对应的可训练 PPO policy 也位于当前仓库。接口与验
 实体、历史和对手 belief，历史 token 会查询当前实体；CNN 始终保留原生 `32×18`
 空间 feature map，动作头让每张牌直接查询576个空间位置并生成独立热力图。随后
 Actor/Critic LSTM hidden state 跨决策持续传递，单场结束时只重置对应 VecEnv 槽位，
-并使用 sequence minibatch 和 truncated BPTT。`native_model_v2` 还提供塔血、圣水、
+并使用 sequence minibatch 和 truncated BPTT。`native_model_v3` 还提供塔血、圣水、
 单位生成/死亡、战斗血量、目标和出牌等逐决策变化特征。
 
 第六阶段的辅助世界模型也已接入默认 PPO：共享编码器会同时预测下一决策的塔血变化、
@@ -23,8 +23,9 @@ Actor/Critic LSTM hidden state 跨决策持续传递，单场结束时只重置�
 标签加入推理观测。默认 v6 还将实际成功执行的卡牌与落点加入动力学辅助预测，
 当前对手信息推断保持纯状态输入；旧 v5 类保留用于加载、续训和消融。
 
-`train_native.py` 默认使用 M5 Pro 的 `mps` GPU；如果 MPS 在当前进程不可用会立即
-报错，不会把正式训练静默降级到 CPU。
+`train_native.py` 与一键入口共用默认 v6 profile、训练日志、自博弈和固定评估流程。
+默认使用 M5 Pro 的 `mps` GPU；MPS 不可用时立即报错。两个入口均支持 `--resume`，
+恢复模型、优化器、历史对手池、评级和 RNG；续训从新对局开始。操作见 [TRAINING.md](TRAINING.md)。
 
 推荐通过交互式一键入口开始正式训练：
 
@@ -45,7 +46,8 @@ Actor/Critic LSTM hidden state 跨决策持续传递，单场结束时只重置�
 结束后删除。运行目录的 `self_play/` 保存逐局结果、Elo、matchup 矩阵和对手池。
 
 训练还会运行独立固定评估赛程：round 0、周期检查点和最终模型始终面对相同 seed、
-相同双方角色以及固定的随机/round-0 对手。评估使用独立环境且不进入 PPO rollout，
+相同双方角色以及固定的随机/round-0 对手。默认保存各轮更新后的快照，在训练结束后
+依次评估，避免重置进行中的训练对局。评估不进入 PPO rollout，
 结果写入 `evaluation/`，并生成 `charts/fixed_evaluation.svg`。因此跨轮次、跨模型比较
 应优先看固定评估的 `score_rate`，而不是随自博弈对手池共同变化的训练胜率。
 

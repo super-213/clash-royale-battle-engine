@@ -5,10 +5,13 @@ from __future__ import annotations
 import csv
 import hashlib
 import importlib
+import importlib.metadata
 import json
 import math
 import os
 import platform
+import random
+import shutil
 import sys
 import time
 from collections import deque
@@ -18,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.vec_env import VecMonitor
 
@@ -66,7 +69,100 @@ METRIC_COLUMNS = (
     "eval/crown_diff",
     "eval/tower_hp_diff",
     "eval/timed_out",
+    "exploration/slot_entropy", "exploration/position_entropy",
+    "exploration/wait_probability", "exploration/wait_rate",
+    *(f"exploration/card_{card}_rate" for card in range(1, 9)),
+    "observation/entity_truncation_rate",
+    "session_timesteps",
 )
+
+
+def resume_directory(checkpoint):
+    return Path(str(Path(checkpoint).resolve()) + ".state")
+
+
+def save_resume_state(checkpoint, model, config, pool=None, telemetry=None):
+    directory = resume_directory(checkpoint)
+    directory.mkdir(parents=True, exist_ok=True)
+    _atomic_json(directory / "config.json", config)
+    rng = {"python": random.getstate(), "numpy": np.random.get_state(), "torch": torch.get_rng_state()}
+    if torch.backends.mps.is_available():
+        rng["mps"] = torch.mps.get_rng_state()
+    if torch.cuda.is_initialized():
+        rng["cuda"] = torch.cuda.get_rng_state_all()
+    torch.save(rng, directory / "rng.pt")
+    state = {"timesteps": model.num_timesteps, "model_sha256": _sha256(checkpoint)}
+    baseline = config.get("_initial_policy_path")
+    if baseline and Path(baseline).is_file():
+        shutil.copyfile(baseline, directory / "initial_policy.zip")
+    try:
+        state["next_native_seed"] = model.get_env().get_attr("_seed_cursor")[0]
+    except AttributeError:
+        pass
+    if telemetry is not None:
+        state.update(episodes=telemetry.episode_count,
+                     episode_rewards=list(telemetry.episode_rewards),
+                     episode_lengths=list(telemetry.episode_lengths))
+    _atomic_json(directory / "runtime.json", state)
+    if pool is not None:
+        pool.save_state(directory / "league")
+
+
+def restore_resume_state(checkpoint, env, pool=None, telemetry=None):
+    directory = resume_directory(checkpoint)
+    saved = json.loads((directory / "runtime.json").read_text())
+    if saved["model_sha256"] != _sha256(checkpoint):
+        raise ValueError("resume model no longer matches its saved runtime state")
+    if "next_native_seed" in saved:
+        env.seed(saved["next_native_seed"])
+    if pool is not None:
+        pool.restore_state(directory / "league")
+    if telemetry is not None:
+        telemetry.episode_count = saved.get("episodes", 0)
+        telemetry.episode_rewards.extend(saved.get("episode_rewards", []))
+        telemetry.episode_lengths.extend(saved.get("episode_lengths", []))
+    rng = torch.load(directory / "rng.pt", map_location="cpu", weights_only=False)
+    random.setstate(rng["python"])
+    np.random.set_state(rng["numpy"])
+    torch.set_rng_state(rng["torch"])
+    if "mps" in rng and torch.backends.mps.is_available():
+        torch.mps.set_rng_state(rng["mps"])
+    if "cuda" in rng and torch.cuda.is_initialized():
+        torch.cuda.set_rng_state_all(rng["cuda"])
+
+
+class UpdatedCheckpointCallback(BaseCallback):
+    """Save after PPO updates, at the next rollout boundary or training end."""
+
+    def __init__(self, run_dir, config, pool=None):
+        super().__init__()
+        self.root, self.config, self.pool = Path(run_dir), config, pool
+        self.telemetry = None
+        self.saved_rounds = set()
+
+    def _save_completed(self, force=False):
+        completed = self.model.num_timesteps // int(self.config["rollout_decisions"])
+        if completed <= 0 or completed in self.saved_rounds:
+            return
+        if not force and completed % int(self.config["checkpoint_every_rounds"]):
+            return
+        directory = self.root / "checkpoints"
+        directory.mkdir(exist_ok=True)
+        path = directory / f"model_{self.model.num_timesteps}_steps.zip"
+        self.model.save(path)
+        save_resume_state(path, self.model, self.config, self.pool, self.telemetry)
+        self.saved_rounds.add(completed)
+
+    def _on_rollout_start(self):
+        self._save_completed()
+
+    def _on_training_end(self):
+        # Runs before deferred evaluation, so an evaluation failure cannot lose
+        # the final completed optimizer update or its resumable league state.
+        self._save_completed(force=True)
+
+    def _on_step(self):
+        return True
 
 
 def utc_now():
@@ -145,13 +241,22 @@ class TrainingTelemetryCallback(BaseCallback):
         self.episode_lengths = deque(maxlen=100)
         self.episode_count = 0
         self.metrics_provider = metrics_provider
+        self.exploration = []
+        self.truncation = []
+        self.last_rollout_metrics = {}
+        self.last_recorded_timesteps = 0
         self.jsonl_path = self.run_dir / "metrics.jsonl"
         self.csv_path = self.run_dir / "metrics.csv"
         with self.csv_path.open("w", newline="", encoding="utf-8") as stream:
             csv.DictWriter(stream, fieldnames=METRIC_COLUMNS).writeheader()
 
     def _on_step(self):
+        diagnostics = getattr(self.model.policy, "_rollout_diagnostics", None)
+        if diagnostics is not None:
+            self.exploration.append(diagnostics.cpu().numpy())
         for info in self.locals.get("infos", ()):
+            if "entity_truncated" in info:
+                self.truncation.append(float(info["entity_truncated"]))
             episode = info.get("episode") if isinstance(info, dict) else None
             if episode:
                 self.episode_count += 1
@@ -169,14 +274,16 @@ class TrainingTelemetryCallback(BaseCallback):
     def _record(self, phase):
         elapsed = max(time.monotonic() - self.started, 1e-9)
         timesteps = int(self.num_timesteps)
+        session_timesteps = timesteps - getattr(self, "initial_timesteps", 0)
         record = {
             "timestamp": utc_now(),
             "phase": phase,
             "round": int(math.ceil(timesteps / self.rollout_decisions)),
             "planned_rounds": self.planned_rounds,
             "timesteps": timesteps,
+            "session_timesteps": session_timesteps,
             "elapsed_seconds": round(elapsed, 3),
-            "fps": round(timesteps / elapsed, 3),
+            "fps": round(session_timesteps / elapsed, 3),
             "episodes": self.episode_count,
             "episode_reward_mean_100": (
                 float(np.mean(self.episode_rewards)) if self.episode_rewards else None
@@ -196,6 +303,8 @@ class TrainingTelemetryCallback(BaseCallback):
                 )
         if self.metrics_provider is not None:
             record.update(self.metrics_provider())
+            record["fps"] = round(session_timesteps / max(elapsed - record.get("eval/total_elapsed_seconds", 0), 1e-9), 3)
+        record.update(self.last_rollout_metrics)
         record.update(self._logger_values())
         self.records.append(record)
         with self.jsonl_path.open("a", encoding="utf-8") as stream:
@@ -247,7 +356,26 @@ class TrainingTelemetryCallback(BaseCallback):
         )
 
     def _on_rollout_end(self):
-        self._record("rollout_end")
+        self.last_rollout_metrics = {}
+        if self.exploration:
+            values = np.concatenate(self.exploration).mean(axis=0)
+            names = ("slot_entropy", "position_entropy", "wait_probability", "wait_rate",
+                     *(f"card_{card}_rate" for card in range(1, 9)))
+            self.last_rollout_metrics.update({f"exploration/{key}": float(value)
+                                             for key, value in zip(names, values)})
+        if self.truncation:
+            self.last_rollout_metrics["observation/entity_truncation_rate"] = float(np.mean(self.truncation))
+        self.exploration.clear()
+        self.truncation.clear()
+
+    def _on_rollout_start(self):
+        if self.model.num_timesteps > self.last_recorded_timesteps:
+            self._record("update_end")
+            self.last_recorded_timesteps = self.model.num_timesteps
+
+    def _on_training_start(self):
+        self.initial_timesteps = self.model.num_timesteps
+        self.last_recorded_timesteps = self.model.num_timesteps
 
     def _on_training_end(self):
         self._record("training_end")
@@ -328,6 +456,12 @@ def write_chart_svg(path, title, records, panels):
 def generate_charts(run_dir, records):
     charts = Path(run_dir) / "charts"
     charts.mkdir(parents=True, exist_ok=True)
+    write_chart_svg(charts / "exploration.svg", "Policy exploration", records, (
+        ("raw entropy", ("exploration/slot_entropy", "exploration/position_entropy")),
+        ("waiting", ("exploration/wait_probability", "exploration/wait_rate")),
+        ("card use per learner decision", tuple(f"exploration/card_{card}_rate" for card in range(1, 9))),
+        ("entity token truncation", ("observation/entity_truncation_rate",)),
+    ))
     write_chart_svg(
         charts / "loss_curves.svg",
         "PPO loss metrics",
@@ -407,7 +541,7 @@ def generate_charts(run_dir, records):
 
 def _sha256(path):
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
+    with Path(path).open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
@@ -427,6 +561,7 @@ def _model_metadata(model, model_path, config, elapsed, telemetry, status):
         "planned_rounds": int(config["rounds"]),
         "completed_rounds": int(math.ceil(model.num_timesteps / config["rollout_decisions"])),
         "timesteps": int(model.num_timesteps),
+        "resume_from": config.get("resume_from"),
         "episodes": telemetry.episode_count,
         "device": str(model.device),
         "algorithm": config["algorithm"],
@@ -441,8 +576,11 @@ def _model_metadata(model, model_path, config, elapsed, telemetry, status):
         "model_sha256": _sha256(model_path),
         "host": {
             "platform": platform.platform(),
+            "machine": platform.machine(),
             "python": sys.version.split()[0],
             "torch": torch.__version__,
+            "dependencies": {name: importlib.metadata.version(name) for name in
+                             ("stable-baselines3", "sb3-contrib", "gymnasium", "numpy")},
         },
     }
     training_env = model.get_env()
@@ -649,6 +787,7 @@ def _write_summary_markdown(path, metadata, run_dir):
 
 def run_sb3_training(config, run_dir):
     """Train an SB3 algorithm from an external JSON profile."""
+    config = dict(config)
     run_dir = Path(run_dir).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
     device = require_training_device(config["device"])
@@ -691,11 +830,7 @@ def run_sb3_training(config, run_dir):
     if self_play_pool is not None:
         env_kwargs["opponent_policy"] = self_play_pool
     env = VecMonitor(env_class(**env_kwargs), filename=str(run_dir / "episodes"))
-    checkpoint = CheckpointCallback(
-        save_freq=max(rollout_steps * int(config["checkpoint_every_rounds"]), 1),
-        save_path=str(run_dir / "checkpoints"),
-        name_prefix="model",
-    )
+    checkpoint = UpdatedCheckpointCallback(run_dir, config, self_play_pool)
     algorithm_kwargs = dict(config.get("algorithm_kwargs", {}))
     if config.get("recurrent_enabled", False):
         algorithm_kwargs["tbptt_steps"] = int(config["tbptt_steps"])
@@ -751,16 +886,35 @@ def run_sb3_training(config, run_dir):
         seed=int(config["seed"]),
         verbose=1,
     )
-    model = algorithm_class(policy_class, env, **algorithm_kwargs)
+    resume_from = config.get("resume_from")
+    if resume_from:
+        saved_config = json.loads((resume_directory(resume_from) / "config.json").read_text())
+        allowed_changes = {"rounds", "device", "port", "evaluation_port", "run_name", "run_dir",
+                           "created_at", "resume_from", "auto_bootstrap", "_initial_policy_path"}
+        for key in saved_config.keys() | config.keys():
+            if key in allowed_changes:
+                continue
+            if config.get(key) != saved_config.get(key):
+                env.close()
+                raise ValueError(f"resume configuration changed: {key}")
+        model = algorithm_class.load(resume_from, env=env, device=device)
+    else:
+        model = algorithm_class(policy_class, env, **algorithm_kwargs)
+    initial_timesteps = model.num_timesteps
+    remaining_timesteps = total_timesteps - initial_timesteps
+    if remaining_timesteps <= 0:
+        env.close()
+        raise ValueError("target rounds must exceed completed checkpoint rounds")
     model.set_logger(configure(str(run_dir / "sb3"), ["stdout", "csv", "tensorboard"]))
     callbacks = [checkpoint]
     if self_play_pool is not None:
         self_play_pool.set_current_model(model)
         bootstrap_path = self_play_pool.snapshots_dir / "snapshot_round_000000.zip"
-        model.save(bootstrap_path.with_suffix(""))
-        self_play_pool.register_snapshot(
-            "snapshot_round_000000", bootstrap_path, round_number=0
-        )
+        if not resume_from:
+            model.save(bootstrap_path.with_suffix(""))
+            self_play_pool.register_snapshot(
+                "snapshot_round_000000", bootstrap_path, round_number=0
+            )
         self_play_callback = SelfPlaySnapshotCallback(
             self_play_pool,
             rollout_decisions=rollout_decisions,
@@ -775,10 +929,14 @@ def run_sb3_training(config, run_dir):
         baseline_dir = run_dir / "evaluation" / "baselines"
         baseline_dir.mkdir(parents=True, exist_ok=True)
         baseline_path = baseline_dir / "initial_policy.zip"
-        model.save(baseline_path.with_suffix(""))
+        if resume_from and (resume_directory(resume_from) / "initial_policy.zip").exists():
+            shutil.copyfile(resume_directory(resume_from) / "initial_policy.zip", baseline_path)
+        else:
+            model.save(baseline_path.with_suffix(""))
+        config["_initial_policy_path"] = str(baseline_path)
         evaluation_env_kwargs = dict(config.get("environment_kwargs", {}))
         evaluation_env_kwargs.update(
-            port=int(config["port"]),
+            port=int(config.get("evaluation_port") or config["port"]),
             decision_ticks=int(config["decision_ticks"]),
         )
         evaluation_callback = FixedEvaluationCallback(
@@ -796,6 +954,8 @@ def run_sb3_training(config, run_dir):
             initial_policy_path=baseline_path,
             device=device,
             frozen_opponents=config.get("evaluation_frozen_opponents"),
+            restore_training=False,
+            deferred=not (config.get("evaluation_port") and int(config["evaluation_port"]) != int(config["port"])),
         )
         callbacks.append(evaluation_callback)
     def runtime_metrics():
@@ -813,6 +973,16 @@ def run_sb3_training(config, run_dir):
         metrics_provider=runtime_metrics,
     )
     callbacks.append(telemetry)
+    checkpoint.telemetry = telemetry
+    if resume_from:
+        try:
+            restore_resume_state(resume_from, env, self_play_pool, telemetry)
+        except BaseException:
+            env.close()
+            model.logger.close()
+            raise
+        if self_play_callback is not None:
+            self_play_callback.saved_rounds.update(entry["round"] for entry in self_play_pool.snapshots)
     started = time.monotonic()
     model_path = run_dir / "final_model.zip"
     try:
@@ -822,12 +992,14 @@ def run_sb3_training(config, run_dir):
             flush=True,
         )
         model.learn(
-            total_timesteps=total_timesteps,
+            total_timesteps=remaining_timesteps,
+            reset_num_timesteps=not bool(resume_from),
             callback=CallbackList(callbacks),
             progress_bar=False,
             log_interval=1,
         )
         model.save(model_path.with_suffix(""))
+        save_resume_state(model_path, model, config, self_play_pool, telemetry)
         elapsed = time.monotonic() - started
         generate_charts(run_dir, telemetry.records)
         metadata = _model_metadata(
@@ -837,6 +1009,9 @@ def run_sb3_training(config, run_dir):
             metadata["self_play"] = self_play_pool.summary()
         if evaluation_callback is not None:
             metadata["fixed_evaluation"] = evaluation_callback.summary()
+            metadata["evaluation_elapsed_seconds"] = round(evaluation_callback.elapsed_seconds, 3)
+        metadata["training_elapsed_seconds"] = round(elapsed - metadata.get("evaluation_elapsed_seconds", 0), 3)
+        metadata["session_timesteps"] = model.num_timesteps - initial_timesteps
         _atomic_json(run_dir / "summary.json", metadata)
         _write_summary_markdown(run_dir / "summary.md", metadata, run_dir)
         _atomic_json(
@@ -862,6 +1037,8 @@ def run_sb3_training(config, run_dir):
             elapsed = time.monotonic() - started
             interrupted_path = run_dir / "interrupted_model.zip"
             model.save(interrupted_path.with_suffix(""))
+            if model.num_timesteps % rollout_decisions == 0 and not model.rollout_buffer.full:
+                save_resume_state(interrupted_path, model, config, self_play_pool, telemetry)
             generate_charts(run_dir, telemetry.records)
             metadata = _model_metadata(
                 model, interrupted_path, config, elapsed, telemetry, status="interrupted"
@@ -887,3 +1064,4 @@ def run_sb3_training(config, run_dir):
         raise
     finally:
         env.close()
+        model.logger.close()

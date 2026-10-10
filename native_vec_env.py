@@ -44,6 +44,7 @@ TEMPORAL_FEATURES = 20
 ENTITY_TARGET_SCHEMA = "native_entity_id_v1"
 EXECUTED_ACTION_SCHEMA = "executed_card_xy_v1"
 EXECUTED_ACTION_FEATURES = 11  # wait, eight card identities, normalized x/y
+TRANSITION_TARGET_SCHEMA = "public_damage_result_v2"
 FIRST_PLAYABLE_TICK = 90
 TICK_SECONDS = 0.05
 MATCH_SECONDS = 300.0
@@ -216,6 +217,34 @@ def _entity_transition_targets(before, after, owner):
     return targets
 
 
+def _public_transition_targets(before, after, owner, initial_tower_hp):
+    """[tower deltas (2), damage result scores (5), valid], including terminal.
+
+    Unit damage uses ID-aligned HP loss, not net army HP or projectile expiry.
+    Scores are fractions of each side's tower/army maximum HP, not attacker IDs.
+    """
+    if before.generation != after.generation:
+        raise ValueError("transition targets require states from the same episode")
+    deltas, unit_damage = [], []
+    future = {int(entity.id): entity for entity in after.entities}
+    for side in (owner, 1 - owner):
+        deltas.append((_tower_hp(after, side) - _tower_hp(before, side))
+                      / initial_tower_hp[side])
+        army = [entity for entity in before.entities
+                if int(entity.owner) == side and int(entity.card) != -1
+                and entity.entity_type != "projectile" and entity.hp is not None]
+        lost = 0.0
+        for entity in army:
+            survivor = future.get(int(entity.id))
+            next_hp = max(0.0, float(survivor.hp or 0)) if survivor is not None else 0.0
+            lost += max(0.0, float(entity.hp) - next_hp)
+        scale = sum(max(float(entity.max_hp or entity.hp), 1.0) for entity in army)
+        unit_damage.append(lost / max(scale, 1.0))
+    return np.asarray((*np.clip(deltas, -1, 1), 0.0,
+                       max(0.0, -deltas[0]), max(0.0, -deltas[1]),
+                       *np.clip(unit_damage, 0, 1), 1.0), dtype=np.float32)
+
+
 def _tower_position(entity, owner):
     if owner == 1:
         return 18000 - int(entity.x), 32000 - int(entity.y)
@@ -318,7 +347,7 @@ class NativeBatchVecEnv(VecEnv):
     """
 
     backend_name = "native_batch_v1"
-    observation_schema = "native_model_v2"
+    observation_schema = "native_model_v3"
     deployment_rules_version = "standard_1v1_dynamic_v1"
     render_mode = None
 
@@ -543,11 +572,17 @@ class NativeBatchVecEnv(VecEnv):
                 ),
                 "deployment_succeeded": bool(accepted),
                 "no_op": not attempted,
+                "entity_truncated": len(old_state.entities) > MAX_ENTITIES,
+                "entity_count": len(old_state.entities),
                 "reward_components": reward_components,
                 "TimeLimit.truncated": False,
                 "entity_target_schema": ENTITY_TARGET_SCHEMA,
                 "entity_targets": _entity_transition_targets(
                     old_state, new_state, learner
+                ),
+                "transition_target_schema": TRANSITION_TARGET_SCHEMA,
+                "transition_targets": _public_transition_targets(
+                    old_state, new_state, learner, slot.initial_tower_hp
                 ),
                 "executed_action_schema": EXECUTED_ACTION_SCHEMA,
                 "executed_action": _executed_action_features(
@@ -817,7 +852,8 @@ class NativeBatchVecEnv(VecEnv):
         entities = np.zeros((MAX_ENTITIES, ENTITY_FEATURES), dtype=np.float32)
         entity_mask = np.zeros(MAX_ENTITIES, dtype=np.float32)
         ordered_entities = _ordered_entities(state)
-        for row, entity in enumerate(ordered_entities[:MAX_ENTITIES]):
+        targets_by_id = {int(entity.id): entity for entity in ordered_entities}
+        for row, entity in enumerate(ordered_entities):
             enemy = int(entity.owner) != owner
             x = float(entity.x) / 1000.0
             y = float(entity.y) / 1000.0
@@ -845,7 +881,12 @@ class NativeBatchVecEnv(VecEnv):
             spatial[12 + side, cell_y, cell_x] = max(
                 spatial[12 + side, cell_y, cell_x], 1.0 - cooldown
             )
-            spatial[14 + side, cell_y, cell_x] = float(entity.target_id is not None)
+            spatial[14 + side, cell_y, cell_x] = max(
+                spatial[14 + side, cell_y, cell_x], float(entity.target_id is not None)
+            )
+
+            if row >= MAX_ENTITIES:
+                continue
 
             token = entities[row]
             token[0] = 1.0
@@ -861,11 +902,7 @@ class NativeBatchVecEnv(VecEnv):
             token[19] = cooldown
             token[20] = float(entity.target_id is not None)
             if entity.target_id is not None:
-                target = next(
-                    (candidate for candidate in ordered_entities
-                     if int(candidate.id) == int(entity.target_id)),
-                    None,
-                )
+                target = targets_by_id.get(int(entity.target_id))
                 if target is not None:
                     target_x = float(target.x) / 1000.0
                     target_y = float(target.y) / 1000.0

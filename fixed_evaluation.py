@@ -296,6 +296,7 @@ class FixedEvaluationCallback(BaseCallback):
         device,
         frozen_opponents=None,
         restore_training=True,
+        deferred=False,
     ):
         super().__init__(verbose=0)
         self.root = Path(run_dir).resolve() / "evaluation"
@@ -314,6 +315,11 @@ class FixedEvaluationCallback(BaseCallback):
         self.initial_policy_path = Path(initial_policy_path).resolve()
         self.device = str(device)
         self.restore_training = bool(restore_training)
+        self.deferred = bool(deferred)
+        if self.deferred and self.restore_training:
+            raise ValueError("deferred evaluation must not reset training environments")
+        self.pending_checkpoints = {}
+        self.elapsed_seconds = 0.0
         self.evaluated_rounds = set()
         self.summaries = []
         self._initial_model = None
@@ -353,6 +359,7 @@ class FixedEvaluationCallback(BaseCallback):
             "environment": self.env_kwargs,
             "battles": self.battles,
             "timeout_policy": "incomplete; excluded from rates; invalid schedule",
+            "execution": "after_training" if self.deferred else "immediate",
         }
         _atomic_json(self.root / "schedule.json", schedule)
 
@@ -564,6 +571,7 @@ class FixedEvaluationCallback(BaseCallback):
             for match in all_matches:
                 stream.write(json.dumps(match, ensure_ascii=False, sort_keys=True) + "\n")
         elapsed = time.monotonic() - started
+        self.elapsed_seconds += elapsed
         summaries = []
         for opponent_id in self.opponents:
             selected = [match for match in all_matches
@@ -593,6 +601,7 @@ class FixedEvaluationCallback(BaseCallback):
             "eval/crown_diff": aggregate["mean_crown_diff"],
             "eval/tower_hp_diff": aggregate["mean_tower_hp_diff"],
             "eval/timed_out": aggregate["timed_out"],
+            "eval/total_elapsed_seconds": self.elapsed_seconds,
         }
         _atomic_json(self.root / "latest.json", {
             "updated_at": _timestamp(),
@@ -621,19 +630,45 @@ class FixedEvaluationCallback(BaseCallback):
         )
 
     def _on_training_start(self):
-        self.evaluate(0)
+        self._schedule(int(self.model.num_timesteps // self.rollout_decisions))
+
+    def _schedule(self, round_number):
+        if self.deferred:
+            directory = self.root / "checkpoints"
+            directory.mkdir(exist_ok=True)
+            path = directory / f"round_{round_number:06d}.zip"
+            self.model.save(path)
+            self.pending_checkpoints[round_number] = path
+        else:
+            self.evaluate(round_number)
 
     def _on_rollout_start(self):
         completed = int(self.num_timesteps // self.rollout_decisions)
         if completed > 0 and completed % self.every_rounds == 0:
-            self.evaluate(completed)
+            self._schedule(completed)
 
     def _on_step(self):
         return True
 
     def _on_training_end(self):
         completed = int(self.num_timesteps // self.rollout_decisions)
-        self.evaluate(completed)
+        self._schedule(completed)
+        if self.deferred:
+            original_model, original_timesteps = self.model, self.num_timesteps
+            # No training follows this callback. Release the data plane once;
+            # do not reset environments, league assignments, or recurrent memory.
+            try:
+                original_model.get_env().env_method("release_batch")
+            except (AttributeError, NotImplementedError):
+                pass
+            try:
+                with preserve_random_state():
+                    for round_number, checkpoint in sorted(self.pending_checkpoints.items()):
+                        self.model = self.algorithm_class.load(checkpoint, device=self.device)
+                        self.num_timesteps = self.model.num_timesteps
+                        self.evaluate(round_number)
+            finally:
+                self.model, self.num_timesteps = original_model, original_timesteps
 
 
 def evaluate_checkpoint(config, checkpoint, output_dir):

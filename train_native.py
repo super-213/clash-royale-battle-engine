@@ -1,121 +1,66 @@
-"""Train the native spatial-heatmap recurrent PPO policy directly."""
+"""Direct CLI for the same profile-driven trainer used by train.sh."""
 
 import argparse
+import json
+import torch
 from pathlib import Path
 
-from stable_baselines3.common.callbacks import CheckpointCallback
-from stable_baselines3.common.vec_env import VecMonitor
-import torch
-
-if __package__:
-    from .native_recurrent_model import (
-        NativeWorldModelPPO,
-        NativeWorldModelRecurrentPolicy,
-    )
-    from .native_vec_env import NativeBatchVecEnv
-else:
-    from native_engine.native_recurrent_model import (
-        NativeWorldModelPPO,
-        NativeWorldModelRecurrentPolicy,
-    )
-    from native_engine.native_vec_env import NativeBatchVecEnv
+from one_click_train import load_profiles, prepare_config, validate_config, ensure_engine
+from training_runtime import require_training_device, run_sb3_training, resume_directory, _atomic_json
 
 
-def require_training_device(device):
-    """Reject an unavailable accelerator instead of silently using the CPU."""
-    requested = str(device).lower()
-    if requested == "mps":
-        if not torch.backends.mps.is_built():
-            raise RuntimeError(
-                "This PyTorch build has no MPS support. Use the clash-royale "
-                "Conda environment on the Apple Silicon host."
-            )
-        if not torch.backends.mps.is_available():
-            raise RuntimeError(
-                "MPS was requested but is unavailable in this process. Run the "
-                "training command from the normal macOS desktop session; do not "
-                "fall back to CPU for the formal M5 Pro training run."
-            )
-        return "mps"
-    if requested == "cpu":
-        return "cpu"
-    raise ValueError("device must be 'mps' or 'cpu'")
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--profile', default='native_hybrid_ppo')
+    parser.add_argument('--port', type=int)
+    parser.add_argument('--evaluation-port', type=int, help='independent resident; otherwise evaluations run after training')
+    parser.add_argument('--battles', type=int)
+    parser.add_argument('--decision-ticks', type=int)
+    parser.add_argument('--seed', type=int)
+    parser.add_argument('--total-timesteps', type=int, help='target total budget, a multiple of rollout_decisions')
+    parser.add_argument('--rounds', type=int)
+    parser.add_argument('--device', choices=('mps', 'cpu'))
+    parser.add_argument('--output', type=Path, default=Path('artifacts/native_training'))
+    parser.add_argument('--resume', type=Path)
+    parser.add_argument('--no-self-play', action='store_true')
+    parser.add_argument('--no-evaluation', action='store_true')
+    parser.add_argument('--dry-run', action='store_true')
+    args = parser.parse_args(argv)
+    if args.resume:
+        config = json.loads((resume_directory(args.resume) / 'config.json').read_text())
+        config['resume_from'] = str(args.resume.resolve())
+    else:
+        profile = next((item for item in load_profiles() if item['profile_id'] == args.profile), None)
+        if profile is None:
+            parser.error(f'unknown profile: {args.profile}')
+        config = prepare_config(profile, defaults_only=True)
+    for field in ('port', 'evaluation_port', 'battles', 'decision_ticks', 'seed', 'device', 'rounds'):
+        value = getattr(args, field)
+        if value is not None:
+            config[field] = value
+    if args.total_timesteps is not None:
+        if args.rounds is not None:
+            parser.error('choose --rounds or --total-timesteps')
+        if args.total_timesteps <= 0 or args.total_timesteps % config['rollout_decisions']:
+            parser.error('total-timesteps must be a positive multiple of rollout_decisions')
+        config['rounds'] = args.total_timesteps // config['rollout_decisions']
+    if args.no_self_play:
+        config['self_play_enabled'] = False
+    if args.no_evaluation:
+        config['fixed_evaluation_enabled'] = False
+    validate_config(config)
+    if args.output.exists():
+        parser.error('use a fresh output directory')
+    args.output.mkdir(parents=True)
+    config['run_dir'] = str(args.output.resolve())
+    _atomic_json(args.output / 'config.json', config)
+    if args.dry_run:
+        print(json.dumps(config, indent=2))
+        return 0
+    ensure_engine(config)
+    run_sb3_training(config, args.output)
+    return 0
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=26789)
-    parser.add_argument("--battles", type=int, default=16)
-    parser.add_argument("--decision-ticks", type=int, default=10)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--total-timesteps", type=int, default=8192)
-    parser.add_argument(
-        "--device",
-        default="mps",
-        choices=("mps", "cpu"),
-        help="Neural-network device. Defaults to the M5 Pro GPU through MPS.",
-    )
-    parser.add_argument(
-        "--output", default="artifacts/native_spatial_heatmap_smoke"
-    )
-    parser.add_argument("--tensorboard-log", default=None)
-    args = parser.parse_args()
-    if 8192 % args.battles:
-        raise ValueError("battles must divide the 8,192-decision PPO rollout")
-    if args.total_timesteps <= 0:
-        raise ValueError("total-timesteps must be positive")
-    device = require_training_device(args.device)
-
-    output = Path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    env = VecMonitor(NativeBatchVecEnv(
-        battles=args.battles,
-        port=args.port,
-        decision_ticks=args.decision_ticks,
-        seed=args.seed,
-        learner_roles="alternating",
-    ))
-    rollout_steps = 8192 // args.battles
-    checkpoint = CheckpointCallback(
-        save_freq=max(rollout_steps, 1),
-        save_path=str(output.parent),
-        name_prefix=output.name,
-    )
-    model = NativeWorldModelPPO(
-        NativeWorldModelRecurrentPolicy,
-        env,
-        n_steps=rollout_steps,
-        batch_size=512,
-        n_epochs=4,
-        tbptt_steps=32,
-        auxiliary_coef=0.1,
-        auxiliary_horizon=4,
-        gamma=0.997,
-        gae_lambda=0.95,
-        learning_rate=3e-4,
-        ent_coef=1.0,
-        clip_range=0.2,
-        device=device,
-        seed=args.seed,
-        tensorboard_log=args.tensorboard_log,
-        verbose=1,
-    )
-    try:
-        model.learn(
-            total_timesteps=args.total_timesteps,
-            callback=checkpoint,
-            progress_bar=False,
-        )
-        model.save(output)
-    finally:
-        env.close()
-
-    print(
-        f"saved={output.with_suffix('.zip')} timesteps={model.num_timesteps} "
-        f"device={device} "
-        f"schema=native_model_v2 backend=native_batch_v1"
-    )
-
-
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    raise SystemExit(main())

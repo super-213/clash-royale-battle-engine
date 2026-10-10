@@ -230,7 +230,7 @@ class NativeEntityTargetsTest(unittest.TestCase):
         labels = torch.zeros(count, entities, 4)
         labels[:, 0, 3] = 1
         labels[:, 0, 1:3] = 1  # Large errors on excluded transitions.
-        valid_rows = [0, 4, 5, 6]
+        valid_rows = [0, 1, 2, 4, 5, 6, 7]
         labels[valid_rows, 0, 1:3] = 0.2
         labels[5, 0, 0] = 1
         labels[5, 0, 1:3] = 1  # Dead entity position must be excluded too.
@@ -247,6 +247,7 @@ class NativeEntityTargetsTest(unittest.TestCase):
         predictions["entity_death"][valid_rows, 0] = 0
         samples = SimpleNamespace(
             observations=observations, entity_targets=labels,
+            transition_targets=torch.zeros(count, 8), future_targets=torch.zeros(count, 2),
             mask=torch.tensor([1, 1, 1, 0, 1, 1, 1, 1]),
             episode_starts=torch.tensor([1, 0, 1, 0, 1, 0, 0, 0]),
             lstm_states=recurrent_module.RNNStates(
@@ -282,6 +283,8 @@ class NativeEntityTargetsTest(unittest.TestCase):
             targets[:, 0, 3] = 1
             buffer.set_entity_targets([
                 {"entity_target_schema": vec_module.ENTITY_TARGET_SCHEMA,
+                 "transition_target_schema": vec_module.TRANSITION_TARGET_SCHEMA,
+                 "transition_targets": np.asarray([0, 0, 0, 0, 0, 0, 0, 1], dtype=np.float32),
                  "entity_targets": target}
                 for target in targets
             ])
@@ -403,6 +406,8 @@ class ActionConditionedWorldModelTest(unittest.TestCase):
                 action[-2:] = value
                 infos.append({
                     "entity_target_schema": vec_module.ENTITY_TARGET_SCHEMA,
+                 "transition_target_schema": vec_module.TRANSITION_TARGET_SCHEMA,
+                 "transition_targets": np.asarray([0, 0, 0, 0, 0, 0, 0, 1], dtype=np.float32),
                     "entity_targets": np.zeros((vec_module.MAX_ENTITIES, 4)),
                     "executed_action_schema": vec_module.EXECUTED_ACTION_SCHEMA,
                     "executed_action": action,

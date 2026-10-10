@@ -93,20 +93,8 @@ def masked_mean(values, mask):
     return selected.mean()
 
 
-def damage_source_targets(temporal):
-    """Map the next interval's public damage deltas to five source classes."""
-    scores = torch.stack((
-        torch.zeros_like(temporal[:, 0]),
-        (-temporal[:, 2]).clamp_min(0),
-        (-temporal[:, 3]).clamp_min(0),
-        torch.maximum((-temporal[:, 10]).clamp_min(0), temporal[:, 8]),
-        torch.maximum((-temporal[:, 11]).clamp_min(0), temporal[:, 9]),
-    ), dim=1)
-    return scores.argmax(dim=1)
-
 
 __all__ = [
     "AuxiliaryWorldModelHead",
-    "damage_source_targets",
     "masked_mean",
 ]

@@ -23,6 +23,6 @@ python docs/essay/generate_figures.py
 
 ## 后续结果需要哪些材料
 
-正式比较以现有 `artifacts/experiments/20261009_mirror_v6/plan.json` 为设计依据，四组版本×三个训练种子，各819200个learner决策，最终checkpoint使用保留测试赛程。后续可据逐局记录与 `comparison.json` 补充得分率、胜率、皇冠差、塔血差、失败动作率及多种子统计，并说明实际硬件、软件版本和无效／未完成赛程。本文静态参数量与构造输入示例不属于实战结果。
+正式比较以现有 `artifacts/experiments/20261010_mirror_v6_fixes/plan.json` 为设计依据，四组版本×三个训练种子，各819200个learner决策，最终checkpoint使用保留测试赛程。后续可据逐局记录与 `comparison.json` 补充得分率、胜率、皇冠差、塔血差、失败动作率及多种子统计，并说明实际硬件、软件版本和无效／未完成赛程。本文静态参数量与构造输入示例不属于实战结果。
 
 若实际配置或源码在训练前发生变化，应更新第5节、来源清单和有关方法说明。`source_manifest.json` 只记录本次写作依据，不能替代正式运行的完整实验记录。

@@ -32,12 +32,12 @@ from .native_spatial_model import (
 )
 from .native_world_model import (
     AuxiliaryWorldModelHead,
-    damage_source_targets,
     masked_mean,
 )
 from .native_vec_env import (
     ENTITY_TARGET_SCHEMA, MAX_ENTITIES,
     EXECUTED_ACTION_SCHEMA, EXECUTED_ACTION_FEATURES,
+    TRANSITION_TARGET_SCHEMA,
 )
 
 
@@ -112,12 +112,16 @@ class TruncatedRecurrentDictRolloutBuffer(RecurrentDictRolloutBuffer):
 
 EntityTargetRolloutSamples = namedtuple(
     "EntityTargetRolloutSamples",
-    (*RecurrentDictRolloutBufferSamples._fields, "entity_targets"),
+    (*RecurrentDictRolloutBufferSamples._fields, "entity_targets", "transition_targets", "future_targets"),
 )
 
 
 class EntityTargetRecurrentDictRolloutBuffer(TruncatedRecurrentDictRolloutBuffer):
     """Store native-ID labels outside policy observations, with identical padding."""
+
+    def __init__(self, *args, auxiliary_horizon=4, **kwargs):
+        self.auxiliary_horizon = int(auxiliary_horizon)
+        super().__init__(*args, **kwargs)
 
     def reset(self):
         super().reset()
@@ -125,6 +129,10 @@ class EntityTargetRecurrentDictRolloutBuffer(TruncatedRecurrentDictRolloutBuffer
             (self.buffer_size, self.n_envs, MAX_ENTITIES, 4), dtype=np.float32
         )
         self._pending_entity_targets = None
+        self.transition_targets = np.zeros((self.buffer_size, self.n_envs, 8), dtype=np.float32)
+        self.terminal_values = np.zeros((self.buffer_size, self.n_envs, 2), dtype=np.float32)
+        self._pending_transition_targets = None
+        self._pending_terminal_values = None
 
     def set_entity_targets(self, infos):
         if len(infos) != self.n_envs or any(
@@ -139,17 +147,51 @@ class EntityTargetRecurrentDictRolloutBuffer(TruncatedRecurrentDictRolloutBuffer
             raise ValueError("invalid native entity target shape")
         if not np.isfinite(targets).all():
             raise ValueError("native entity targets must be finite")
+        if any(info.get("transition_target_schema") != TRANSITION_TARGET_SCHEMA for info in infos):
+            raise ValueError("world-model training requires public_damage_result_v2 labels")
+        transitions = np.stack([info["transition_targets"] for info in infos])
+        if transitions.shape != (self.n_envs, 8) or not np.isfinite(transitions).all():
+            raise ValueError("invalid public transition targets")
+        terminal = np.zeros((self.n_envs, 2), dtype=np.float32)
+        for index, info in enumerate(infos):
+            if "terminal_observation" in info:
+                scalar = info["terminal_observation"]["scalar"]
+                terminal[index] = (scalar[9] - scalar[10] + 0.25 * (scalar[2] - scalar[3]), 1)
         self._pending_entity_targets = targets
+        self._pending_transition_targets = transitions
+        self._pending_terminal_values = terminal
 
     def add(self, *args, **kwargs):
         if self._pending_entity_targets is None:
             raise RuntimeError("missing native entity targets for rollout step")
         self.entity_targets[self.pos] = self._pending_entity_targets
+        self.transition_targets[self.pos] = self._pending_transition_targets
+        self.terminal_values[self.pos] = self._pending_terminal_values
         self._pending_entity_targets = None
+        self._pending_transition_targets = self._pending_terminal_values = None
         super().add(*args, **kwargs)
 
     def get(self, batch_size=None):
         if not self.generator_ready:
+            # Labels can cross TBPTT/minibatch boundaries; gradients still cannot.
+            # Use terminal scalar at t+h even when the rollout contains a reset.
+            future = np.zeros((self.buffer_size, self.n_envs, 2), dtype=np.float32)
+            scalar = self.observations["scalar"]
+            for step in range(self.buffer_size):
+                endpoint = step + self.auxiliary_horizon
+                if endpoint < self.buffer_size:
+                    valid = ~self.episode_starts[step + 1:endpoint + 1].astype(bool).any(axis=0)
+                    values = scalar[endpoint, :, 9] - scalar[endpoint, :, 10] + 0.25 * (
+                        scalar[endpoint, :, 2] - scalar[endpoint, :, 3])
+                    future[step, :, 0] = values
+                    future[step, :, 1] = valid
+                if endpoint - 1 < self.buffer_size:
+                    terminal = self.terminal_values[endpoint - 1]
+                    valid = (terminal[:, 1] > 0.5) & ~self.episode_starts[
+                        step + 1:endpoint].astype(bool).any(axis=0)
+                    future[step, valid] = terminal[valid]
+            self.future_targets = self.swap_and_flatten(future)
+            self.transition_targets = self.swap_and_flatten(self.transition_targets)
             self.entity_targets = self.swap_and_flatten(self.entity_targets)
         yield from super().get(batch_size)
 
@@ -158,7 +200,9 @@ class EntityTargetRecurrentDictRolloutBuffer(TruncatedRecurrentDictRolloutBuffer
         targets = self.pad(self.entity_targets[batch_inds]).reshape(
             -1, MAX_ENTITIES, 4
         )
-        return EntityTargetRolloutSamples(*samples, targets)
+        transitions = self.pad(self.transition_targets[batch_inds]).reshape(-1, 8)
+        future = self.pad(self.future_targets[batch_inds]).reshape(-1, 2)
+        return EntityTargetRolloutSamples(*samples, targets, transitions, future)
 
 
 ActionTargetRolloutSamples = namedtuple(
@@ -246,6 +290,8 @@ class NativeRecurrentPPO(RecurrentPPO):
             gae_lambda=self.gae_lambda,
             n_envs=self.n_envs,
             tbptt_steps=self.tbptt_steps,
+            **({"auxiliary_horizon": self.auxiliary_horizon}
+               if isinstance(self, NativeWorldModelPPO) else {}),
         )
 
     def train(self):
@@ -322,9 +368,6 @@ class NativeWorldModelPPO(NativeRecurrentPPO):
     def _auxiliary_losses(self, rollout_data, predictions):
         sequence_count = int(rollout_data.lstm_states.pi[0].shape[1])
         mask = self._sequences(rollout_data.mask > 1e-8, sequence_count)
-        starts = self._sequences(
-            rollout_data.episode_starts > 0.5, sequence_count
-        )
         observations = {
             key: self._sequences(value, sequence_count)
             for key, value in rollout_data.observations.items()
@@ -333,47 +376,28 @@ class NativeWorldModelPPO(NativeRecurrentPPO):
             key: self._sequences(value, sequence_count)
             for key, value in predictions.items()
         }
-        current_mask = mask[:, :-1]
-        next_mask = mask[:, 1:] & ~starts[:, 1:]
-        pair_mask = current_mask & next_mask
-
+        transitions = self._sequences(rollout_data.transition_targets, sequence_count)
+        transition_valid = mask & (transitions[..., 7] > 0.5)
         tower_error = functional.smooth_l1_loss(
-            predicted["tower_delta"][:, :-1],
-            observations["temporal"][:, 1:, 2:4],
-            reduction="none",
+            predicted["tower_delta"], transitions[..., :2], reduction="none"
         ).mean(dim=-1)
-        losses = {"tower_delta": masked_mean(tower_error, pair_mask)}
-
-        damage_targets = damage_source_targets(
-            observations["temporal"][:, 1:].reshape(
-                -1, observations["temporal"].shape[-1]
-            )
-        ).reshape_as(pair_mask)
+        losses = {"tower_delta": masked_mean(tower_error, transition_valid)}
         damage_error = functional.cross_entropy(
-            predicted["damage_source"][:, :-1].reshape(-1, 5),
-            damage_targets.reshape(-1),
-            reduction="none",
-        ).reshape_as(pair_mask)
-        losses["damage_source"] = masked_mean(damage_error, pair_mask)
+            predicted["damage_source"].reshape(-1, 5),
+            transitions[..., 2:7].argmax(dim=-1).reshape(-1), reduction="none"
+        ).reshape_as(mask)
+        losses["damage_source"] = masked_mean(damage_error, transition_valid)
 
         targets = self._sequences(rollout_data.entity_targets, sequence_count)
-        targets = targets[:, :-1]
         death_targets = targets[..., 0]
-        position_delta = targets[..., 1:3]
-        entity_valid = (
-            pair_mask.unsqueeze(-1) & (targets[..., 3] > 0.5)
-            & (observations["entity_mask"][:, :-1] > 0.5)
-        )
+        entity_valid = (mask.unsqueeze(-1) & (targets[..., 3] > 0.5)
+                        & (observations["entity_mask"] > 0.5))
         death_error = functional.binary_cross_entropy_with_logits(
-            predicted["entity_death"][:, :-1],
-            death_targets,
-            reduction="none",
+            predicted["entity_death"], death_targets, reduction="none"
         )
         losses["entity_death"] = masked_mean(death_error, entity_valid)
         position_error = functional.smooth_l1_loss(
-            predicted["entity_position_delta"][:, :-1],
-            position_delta,
-            reduction="none",
+            predicted["entity_position_delta"], targets[..., 1:3], reduction="none"
         ).mean(dim=-1)
         losses["entity_position"] = masked_mean(
             position_error, entity_valid & (death_targets < 0.5)
@@ -408,32 +432,11 @@ class NativeWorldModelPPO(NativeRecurrentPPO):
         ).sum(dim=-1)
         losses["opponent_next_card"] = masked_mean(next_card_error, valid)
 
-        horizon = self.auxiliary_horizon
-        if mask.shape[1] > horizon:
-            future_mask = (
-                mask[:, :-horizon]
-                & mask[:, horizon:]
-                & ~starts[:, horizon:]
-            )
-            future_scalar = scalar[:, horizon:]
-            future_targets = (
-                future_scalar[..., 9] - future_scalar[..., 10]
-                + 0.25 * (
-                    future_scalar[..., 2] - future_scalar[..., 3]
-                )
-            )
-            future_error = functional.smooth_l1_loss(
-                predicted["future_value"][:, :-horizon],
-                future_targets,
-                reduction="none",
-            )
-            losses["future_value"] = masked_mean(
-                future_error, future_mask
-            )
-        else:
-            losses["future_value"] = (
-                predicted["future_value"].sum() * 0.0
-            )
+        future = self._sequences(rollout_data.future_targets, sequence_count)
+        future_error = functional.smooth_l1_loss(
+            predicted["future_value"], future[..., 0], reduction="none"
+        )
+        losses["future_value"] = masked_mean(future_error, mask & (future[..., 1] > 0.5))
         total = sum(
             self.auxiliary_weights[name] * value
             for name, value in losses.items()
@@ -691,6 +694,15 @@ class NativeRecurrentMaskedPolicy(RecurrentMultiInputActorCriticPolicy):
         value_latent = self.mlp_extractor.forward_critic(value_latent)
         distribution = self._distribution(policy_latent, observation)
         actions = distribution.get_actions(deterministic=deterministic)
+        slot_entropy, position_entropy = distribution.entropy_components()
+        selected_cards = observation["hand"][:, :4].gather(
+            1, (actions[:, 0].long() - 1).clamp(0, 3).unsqueeze(1)
+        ).squeeze(1)
+        self._rollout_diagnostics = torch.stack((
+            slot_entropy, position_entropy, distribution.slot_distribution.probs[:, 0],
+            (actions[:, 0] == 0).float(),
+            *[((actions[:, 0] > 0) & (selected_cards == card)).float() for card in range(1, 9)],
+        ), dim=1).detach()
         return (
             actions.reshape((-1, *self.action_space.shape)),
             self.value_net(value_latent),

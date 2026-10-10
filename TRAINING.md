@@ -73,11 +73,12 @@ APK 和 probe 的 ARM64 模拟器。冷启动后若 probe 尚未加载，它会�
 | `episodes.monitor.csv` | Stable-Baselines3 episode monitor |
 | `sb3/progress.csv` | SB3 原始 logger 数据 |
 | `sb3/events.out.tfevents.*` | TensorBoard 数据 |
-| `checkpoints/*.zip` | 按交互设置定期保存的模型 |
+| `checkpoints/*.zip` | 完成 PPO 更新后定期保存，最终轮额外保存 |
+| `*.zip.state/` | 与模型哈希绑定的续训配置、RNG、联赛副本和运行状态 |
 | `final_model.zip` | 最终模型 |
 | `interrupted_model.zip` | 异常或手动中断时尽力保存的最后模型 |
 | `summary.json` / `summary.md` | 耗时、轮次、参数量、模型哈希等最终信息 |
-| `charts/*.svg` | loss、reward/episode、explained variance、KL/clip、学习率、吞吐率和 MPS 显存曲线 |
+| `charts/*.svg` | loss、reward/episode、explained variance、KL/clip、学习率、训练吞吐率、MPS 显存及探索诊断曲线 |
 | `self_play/pool.json` | 对手池、活跃快照、聚合胜负、Elo 和 matchup 矩阵 |
 | `self_play/matches.jsonl` | 每场自博弈的双方版本、角色、seed 和结果 |
 | `self_play/ratings.csv` | learner 与对手 Elo 的时间序列 |
@@ -87,7 +88,8 @@ APK 和 probe 的 ARM64 模拟器。冷启动后若 probe 尚未加载，它会�
 | `evaluation/summary.csv` | 每轮按对手及 aggregate 汇总的胜率、得分率和局面指标 |
 | `evaluation/latest.json` | 最近一轮固定评估，适合 Agent 读取 |
 | `evaluation/status.json` | 当前是否正在评估及最近完成轮次 |
-| `evaluation/baselines/initial_policy.zip` | 训练开始时冻结的 round-0 基准策略 |
+| `evaluation/baselines/initial_policy.zip` | 训练开始时冻结的 round-0 基准策略，续训保留原版本 |
+| `evaluation/checkpoints/*.zip` | 默认模式下等待训练结束后评估的各轮模型 |
 | `charts/fixed_evaluation.svg` | 固定赛程胜率、得分率、皇冠差和塔血差曲线 |
 
 查看 TensorBoard：
@@ -115,7 +117,7 @@ conda run -n clash-royale tensorboard --logdir artifacts/training_runs
 `trainer(config, run_dir)` 并在 profile 中替换 trainer。这样 `./train.sh`、交互配置、
 运行目录和日志入口保持不变。
 
-默认 profile 使用 `NativeSpatialHeatmapRecurrentPolicy`。它把手牌、实体、历史和
+默认 profile 使用 `NativeActionConditionedWorldModelRecurrentPolicy`。它把手牌、实体、历史和
 belief 通过 cross-attention 连接，同时保留 `32×18` CNN feature map；每张牌直接查询
 576个空间 token 并生成自己的 placement heatmap。配置中的 `cross_modal_dim`、
 `cross_modal_heads`、`cross_modal_entity_layers` 和 `spatial_feature_channels` 会被自动
@@ -123,20 +125,25 @@ belief 通过 cross-attention 连接，同时保留 `32×18` CNN feature map；�
 checkpoint 和消融实验使用。
 
 第六阶段默认同时记录 `train/auxiliary_loss` 以及八个单项 loss，并额外生成
-`charts/auxiliary_losses.svg`。相邻序列负责监督下一步塔血、实体死亡/位置和伤害来源；
-当前公开估计负责监督对手圣水区间与卡序 belief；未来局面价值默认使用4个决策后的
-塔血与皇冠差，按默认 `decision_ticks=10` 约为2秒。
+`charts/auxiliary_losses.svg`。环境从复位前的完整相邻原生状态生成塔血、实体消失/
+位移及伤害结果标签，独立存入 rollout buffer；终局和 TBPTT 末项也参加监督，padding
+除外。伤害结果按 ID 对齐的非投射物 HP 损失计算，新增单位血量不再抵消已有伤害。
+当前公开估计监督对手圣水区间与卡序 belief；未来局面指标默认使用4个决策后的
+塔血与皇冠差，约为2秒。未来标签可跨 TBPTT/minibatch 切分，但不跨新局；精确落在
+终局时使用 terminal observation。rollout 尾部缺少后继时仍无该项标签。
 
 ## 独立固定评估赛程
 
-默认 profile 会在 round 0、每 5 轮以及最终轮暂停训练数据收集，运行一套与 PPO
-rollout 完全隔离的评估。默认对手是合法随机策略和训练开始时冻结的
+默认 profile 在 round 0、每 5 轮和最终轮保存评估快照，全部训练更新完成后依次
+重载执行固定评估。快照及每轮 loss 都对应该轮完成后的参数，避免少算一次 PPO 更新。默认对手是合法随机策略和训练开始时冻结的
 `initial_policy`；每个对手使用固定的 16 个 seed，每个 seed 分别让 learner 作为 p0、
 p1 各打一局，因此每次共 64 局。learner 和冻结策略都使用 deterministic action。
 
-原生服务只有一条 resident batch 数据通道。评估开始时回调会释放训练通道，评估结束
-后重新配置 16 路训练环境，并把 Actor/Critic LSTM 状态全部按 episode start 重置。
-评估轨迹不会写入 rollout buffer、不会参与 PPO 或辅助世界模型的梯度更新。
+一个 resident 原生服务只有一条 batch 数据通道。默认结束训练后释放通道一次，
+评估不会重置进行中的训练对局、联赛分配或循环记忆。若有第二个独立 resident，可在
+profile 设置 `evaluation_port`（直接入口为 `--evaluation-port`）实时评估；两个端口
+必须连接不同 resident，仅转发到同一进程不能隔离。评估轨迹不进入 rollout 或梯度。
+共享服务的默认模式下，训练过程中不会出现已完成的开发评估结果；训练结束后生成曲线。
 
 训练中的自博弈胜率随对手池变化，只适合观察联赛过程；正式比较不同 checkpoint 时应
 以 `evaluation/summary.csv` 中同一固定赛程的 `aggregate` 行为准。`score_rate` 将和局
@@ -230,7 +237,9 @@ reward 或最优 checkpoint；各实验复用相同对手副本、哈希、种�
 | `comparison.json` | 均值、样本标准差、最差/最好值及同训练种子的 `full − variant` 差值 |
 | `comparison.md` | 可读对照表及完整性状态 |
 
-端到端吞吐包含开发评估和训练期间保存开销，不能解释为纯 PPO 或原生 stepping 速度。
+`training_elapsed_seconds` 和决策吞吐排除固定评估耗时，包含采样、PPO、日志与保存；
+`elapsed_seconds` 保留包含评估的总耗时。续训吞吐使用本次新增决策数。两者均不能
+解释为纯 PPO 或原生 stepping 速度。
 正式汇总从逐局记录重新计算，拒绝预算不足、缺局、重复局、超时、配置/赛程改动及
 checkpoint 哈希不匹配。中途已有完整结果的运行可跳过；中断训练保留已有产物，
 重新从头训练需新建 suite，避免混入不等预算。Python/profile 改动后也应新建计划。
@@ -245,7 +254,8 @@ conda run -n clash-royale python training_experiments.py report \
 优先查看各冻结策略及 p0/p1 的得分率、胜率、皇冠差、塔血差和非法动作率，再看
 aggregate；报告多种子均值、标准差与最差结果，保留同种子的成对差值。当前汇总是
 描述统计，不自动宣布统计显著。辅助 loss 降低不能代替镜像对战强度提升；当前流程
-验证辅助任务的策略收益，独立的辅助预测精度验证集仍需另行构建。
+验证辅助任务的策略收益。独立辅助预测验证工具见下节；正式原生验证集与预测精度
+结果仍需实际采集、评分。
 
 ## 单独重评已保存模型
 
@@ -262,3 +272,65 @@ conda run -n clash-royale python fixed_evaluation.py \
 原生引擎需已就绪。旧单次训练配置使用 `initial_policy` 时，从该训练目录的
 `evaluation/baselines/initial_policy.zip` 加载；独立评估不建立 PPO rollout，不更新
 参数。退出码 0 表示赛程完整，2 表示存在未完成对局。
+
+
+## 直接入口与续训
+
+直接入口默认使用同一个 v6 profile，`--output` 现在表示新运行目录：
+
+```bash
+conda run -n clash-royale python train_native.py --rounds 10 --output artifacts/native_training_v6
+./train.sh --resume artifacts/native_training_v6/final_model.zip --rounds 20 --defaults
+```
+
+`--rounds 20` 是累计目标20轮；如果已完成10轮，只再训练10轮。也可用直接入口的
+`--resume <checkpoint> --rounds 20 --output <新目录>`。必须一起保留 `.zip` 与同名
+`.zip.state/`，检查点和最终模型都有对应状态；普通旧 `.zip` 不含这些运行状态，不能
+冒充完整联赛续训。状态包含模型哈希、原配置、全局 RNG、下一 native seed、历史模型
+副本、评级、比赛聚合和联赛 RNG；模型文件保留优化器及累计更新数。续训启动新对局，
+不恢复 resident 内部战斗、正在进行的对手分配和对局循环状态，因此不保证逐步轨迹相同。
+核心训练配置必须一致，可更改累计轮数、设备、端口和新运行目录。
+
+中断后的 `interrupted_model.zip` 是尽力保存的权重，可能处于采样或优化中间；恢复时
+优先使用最近一个完整的 `checkpoints/*.zip` 及其状态目录。最终轮在固定评估之前额外
+保存，评估失败也保留完整的训练检查点。
+
+## 探索诊断与策略回放
+
+每轮 `metrics.jsonl/csv` 和 `charts/exploration.svg` 记录选牌熵、按选牌概率加权的
+条件落点熵、等待概率/采样率及八张卡牌采样率。统计来自 learner 的采样 forward，
+不会被当前策略镜像对手的推理覆盖；它们反映策略分布与采样，不等同于成功出牌率。
+探索系数和调度保持 profile 设置，尚无实验依据自动修改。
+
+```bash
+conda run -n clash-royale python native_visualizer.py \
+  --checkpoint artifacts/native_training_v6/final_model.zip \
+  --steps 64 --output artifacts/replays/v6.html
+```
+
+需要已就绪的原生服务；工具记录 deterministic learner 对合法随机对手的轨迹，输出
+独立 HTML 与 JSON。回放可逐帧选牌查看实际掩码后的条件落点概率、非法格、双方占据、
+等待概率和所选动作；从 checkpoint 侧车或运行目录自动读取配置。
+
+## 独立辅助预测验证
+
+先使用冻结 checkpoint 在独立 seeds 上采集公开轨迹，再对同一份数据评分：
+
+```bash
+conda run -n clash-royale python auxiliary_validation.py collect \
+  --checkpoint artifacts/native_training_v6/final_model.zip \
+  --dataset artifacts/validation/public_v3.npz --seed-base 2900001
+conda run -n clash-royale python auxiliary_validation.py evaluate \
+  --checkpoint artifacts/native_training_v6/final_model.zip \
+  --dataset artifacts/validation/public_v3.npz --output artifacts/validation/v6_metrics.json
+```
+
+采集需原生服务；评分仅需 NPZ 和模型。验证 seeds 必须避开完整训练范围、开发 seeds
+和实验计划的保留测试 seeds。数据记录观测/标签 schema、决策间隔、horizon、seed/角色、
+采集策略权重哈希与 checkpoint；评分记录数据文件哈希，不更新参数。比较模型时固定
+同一数据文件，各模型从观测序列重建自己的循环状态，不复用采集模型的 hidden state。
+支持 v5/v6，v4 没有辅助头，不参与辅助预测评分。输出塔血/位移/短期指标 MAE、实体
+消失 BCE/准确率、伤害结果准确率，以及公开圣水/卡序重构指标和有效标签数。
+
+这些是公开动力学与规则信念重构验证，不包含真实隐藏手牌或真实 attacker ID；不能
+据此宣称恢复隐藏信息。正式原生数据、等预算多种子长训及强度结果仍待运行。

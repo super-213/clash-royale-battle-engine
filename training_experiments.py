@@ -210,7 +210,7 @@ def read_run_result(plan, run):
         row = _summarize(selected, config["rounds"], metadata["timesteps"], name, 0)
         row.update(variant=run["variant"], training_seed=run["seed"],
                    parameters=metadata["parameters"], elapsed_seconds=metadata["elapsed_seconds"],
-                   decisions_per_second=metadata["timesteps"] / max(1e-9, metadata["elapsed_seconds"]))
+                   decisions_per_second=metadata.get("session_timesteps", metadata["timesteps"]) / max(1e-9, metadata.get("training_elapsed_seconds", metadata["elapsed_seconds"])))
         rows.append(row)
     return rows
 
