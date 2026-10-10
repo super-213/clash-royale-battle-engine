@@ -428,6 +428,78 @@ class TrainingFixesTest(unittest.TestCase):
             for name, value in shared.policy.state_dict().items():
                 torch.testing.assert_close(value, upstream.policy.state_dict()[name], rtol=0, atol=0)
 
+    def test_no_aux_skips_predictions_and_matches_ppo_updates_exactly(self):
+        from sb3_contrib import RecurrentPPO
+        from training_experiments import variant_config
+        from native_engine.native_recurrent_model import (
+            NativeRecurrentPPO, NativeActionConditionedWorldModelRecurrentPolicy,
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = variant_config(self.config(), 'no_aux')
+            config.update(rounds=1, epochs_per_round=2)
+            with patch.object(NativeActionConditionedWorldModelRecurrentPolicy, 'auxiliary_predictions',
+                              side_effect=AssertionError('disabled auxiliary heads must not run')):
+                self.train(root / 'skipped', config)
+            with patch.object(NativeRecurrentPPO, 'train', RecurrentPPO.train):
+                self.train(root / 'ppo', config)
+            skipped = NativeActionConditionedWorldModelPPO.load(root / 'skipped/final_model.zip', device='cpu')
+            ppo = NativeActionConditionedWorldModelPPO.load(root / 'ppo/final_model.zip', device='cpu')
+            self.assertEqual(skipped.n_epochs, 2)
+            self.assertEqual(skipped._n_updates, ppo._n_updates)
+            for name, value in skipped.policy.state_dict().items():
+                torch.testing.assert_close(value, ppo.policy.state_dict()[name], rtol=0, atol=0)
+            for parameter in skipped.policy.world_model.parameters():
+                self.assertNotIn(parameter, skipped.policy.optimizer.state)
+
+    def test_all_zero_auxiliary_weights_skip_predictions(self):
+        from native_engine.native_recurrent_model import NativeActionConditionedWorldModelRecurrentPolicy
+        with TemporaryDirectory() as directory:
+            config = self.config()
+            config.update(rounds=1, auxiliary_weights={
+                name: 0. for name in NativeActionConditionedWorldModelPPO.DEFAULT_AUXILIARY_WEIGHTS
+            })
+            with patch.object(NativeActionConditionedWorldModelRecurrentPolicy, 'auxiliary_predictions',
+                              side_effect=AssertionError('zero-weight auxiliary heads must not run')):
+                self.train(directory, config)
+            model = NativeActionConditionedWorldModelPPO.load(Path(directory) / 'final_model.zip', device='cpu')
+            self.assertTrue(all(torch.isfinite(value).all() for value in model.policy.parameters()))
+
+    def test_zero_weight_tasks_ignore_nonfinite_or_missing_predictions(self):
+        observation = {key: torch.zeros(2, *space.shape)
+                       for key, space in native_observation_space().spaces.items()}
+        observation['entity_mask'][:, 0] = 1
+        observation['public_belief'][:, :8] = .5
+        observation['public_belief'][:, 8:16] = 1 / 8
+        entities = torch.zeros(2, MAX_ENTITIES, 4)
+        entities[:, 0, 3] = 1
+        transition = torch.zeros(2, 8)
+        transition[:, 2] = transition[:, 7] = 1
+        samples = SimpleNamespace(observations=observation, entity_targets=entities,
+            transition_targets=transition, future_targets=torch.ones(2, 2), mask=torch.ones(2),
+            lstm_states=RNNStates((torch.zeros(1, 1, 8),)*2, (torch.zeros(1, 1, 8),)*2))
+        shapes = {'tower_delta': (2, 2), 'damage_source': (2, 5), 'opponent_elixir': (2, 5),
+                  'opponent_hand': (2, 8), 'opponent_next_card': (2, 8), 'future_value': (2,),
+                  'entity_death': (2, MAX_ENTITIES), 'entity_position_delta': (2, MAX_ENTITIES, 2)}
+        model = NativeActionConditionedWorldModelPPO.__new__(NativeActionConditionedWorldModelPPO)
+        for task in model.DEFAULT_AUXILIARY_WEIGHTS:
+            with self.subTest(task=task):
+                output = 'entity_position_delta' if task == 'entity_position' else task
+                model.auxiliary_weights = dict(model.DEFAULT_AUXILIARY_WEIGHTS, **{task: 0.})
+                predictions = {name: torch.full(shape, float('nan') if name == output else 0.,
+                                               requires_grad=True) for name, shape in shapes.items()}
+                total, losses = model._auxiliary_losses(samples, predictions)
+                self.assertNotIn(task, losses)
+                self.assertTrue(torch.isfinite(total))
+                total.backward()
+                self.assertIsNone(predictions[output].grad)
+                self.assertTrue(all(torch.isfinite(value.grad).all()
+                                    for name, value in predictions.items() if name != output))
+                without, _ = model._auxiliary_losses(samples, {
+                    name: value for name, value in predictions.items() if name != output
+                })
+                torch.testing.assert_close(total, without)
+
     def test_historical_checkpoint_loading_preserves_real_rng_streams(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

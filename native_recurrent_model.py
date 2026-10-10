@@ -329,7 +329,11 @@ class NativeRecurrentPPO(RecurrentPPO):
         entropy_losses = []
         pg_losses, value_losses, clip_fractions = [], [], []
         auxiliary_totals = []
-        auxiliary_tasks = self.DEFAULT_AUXILIARY_WEIGHTS if self.has_auxiliary_tasks else ()
+        auxiliary_tasks = (
+            tuple(name for name, weight in self.auxiliary_weights.items() if weight > 0)
+            if self.has_auxiliary_tasks and self.auxiliary_coef > 0 else ()
+        )
+        optimize_auxiliary = bool(auxiliary_tasks)
         auxiliary_records = {name: [] for name in auxiliary_tasks}
         continue_training = True
         approx_kl_divs = []
@@ -349,7 +353,7 @@ class NativeRecurrentPPO(RecurrentPPO):
                     rollout_data.episode_starts,
                 )
                 task_losses = {}
-                if self.has_auxiliary_tasks:
+                if optimize_auxiliary:
                     if self.action_conditioned:
                         predictions = self.policy.auxiliary_predictions(
                             executed_actions=rollout_data.executed_actions
@@ -403,7 +407,7 @@ class NativeRecurrentPPO(RecurrentPPO):
                     + self.ent_coef * entropy_loss
                     + self.vf_coef * value_loss
                 )
-                if self.has_auxiliary_tasks:
+                if optimize_auxiliary:
                     loss = loss + self.auxiliary_coef * auxiliary_loss
                     auxiliary_totals.append(auxiliary_loss.item())
                 for name, value in task_losses.items():
@@ -448,7 +452,7 @@ class NativeRecurrentPPO(RecurrentPPO):
         self.logger.record("train/clip_fraction", np.mean(clip_fractions))
         self.logger.record("train/loss", loss.item())
         self.logger.record("train/explained_variance", explained_var)
-        if self.has_auxiliary_tasks:
+        if optimize_auxiliary:
             self.logger.record("train/auxiliary_loss", np.mean(auxiliary_totals))
         for name, values in auxiliary_records.items():
             self.logger.record(
@@ -550,69 +554,78 @@ class NativeWorldModelPPO(NativeRecurrentPPO):
         }
         transitions = self._sequences(rollout_data.transition_targets, sequence_count)
         transition_valid = mask & (transitions[..., 7] > 0.5)
-        tower_error = functional.smooth_l1_loss(
-            predicted["tower_delta"], transitions[..., :2], reduction="none"
-        ).mean(dim=-1)
-        losses = {"tower_delta": masked_mean(tower_error, transition_valid)}
-        damage_error = functional.cross_entropy(
-            predicted["damage_source"].reshape(-1, 5),
-            transitions[..., 2:7].argmax(dim=-1).reshape(-1), reduction="none"
-        ).reshape_as(mask)
-        losses["damage_source"] = masked_mean(damage_error, transition_valid)
+        losses = {}
+        if self.auxiliary_weights["tower_delta"] > 0:
+            tower_error = functional.smooth_l1_loss(
+                predicted["tower_delta"], transitions[..., :2], reduction="none"
+            ).mean(dim=-1)
+            losses["tower_delta"] = masked_mean(tower_error, transition_valid)
+        if self.auxiliary_weights["damage_source"] > 0:
+            damage_error = functional.cross_entropy(
+                predicted["damage_source"].reshape(-1, 5),
+                transitions[..., 2:7].argmax(dim=-1).reshape(-1), reduction="none"
+            ).reshape_as(mask)
+            losses["damage_source"] = masked_mean(damage_error, transition_valid)
 
         targets = self._sequences(rollout_data.entity_targets, sequence_count)
         death_targets = targets[..., 0]
         entity_valid = (mask.unsqueeze(-1) & (targets[..., 3] > 0.5)
                         & (observations["entity_mask"] > 0.5))
-        death_error = functional.binary_cross_entropy_with_logits(
-            predicted["entity_death"], death_targets, reduction="none"
-        )
-        losses["entity_death"] = masked_mean(death_error, entity_valid)
-        position_error = functional.smooth_l1_loss(
-            predicted["entity_position_delta"], targets[..., 1:3], reduction="none"
-        ).mean(dim=-1)
-        losses["entity_position"] = masked_mean(
-            position_error, entity_valid & (death_targets < 0.5)
-        )
+        if self.auxiliary_weights["entity_death"] > 0:
+            death_error = functional.binary_cross_entropy_with_logits(
+                predicted["entity_death"], death_targets, reduction="none"
+            )
+            losses["entity_death"] = masked_mean(death_error, entity_valid)
+        if self.auxiliary_weights["entity_position"] > 0:
+            position_error = functional.smooth_l1_loss(
+                predicted["entity_position_delta"], targets[..., 1:3], reduction="none"
+            ).mean(dim=-1)
+            losses["entity_position"] = masked_mean(
+                position_error, entity_valid & (death_targets < 0.5)
+            )
 
         valid = mask
         scalar = observations["scalar"]
-        elixir_targets = torch.clamp(
-            (scalar[..., 1] * 5).long(), min=0, max=4
-        )
-        elixir_error = functional.cross_entropy(
-            predicted["opponent_elixir"].reshape(-1, 5),
-            elixir_targets.reshape(-1),
-            reduction="none",
-        ).reshape_as(valid)
-        losses["opponent_elixir"] = masked_mean(elixir_error, valid)
+        if self.auxiliary_weights["opponent_elixir"] > 0:
+            elixir_targets = torch.clamp(
+                (scalar[..., 1] * 5).long(), min=0, max=4
+            )
+            elixir_error = functional.cross_entropy(
+                predicted["opponent_elixir"].reshape(-1, 5),
+                elixir_targets.reshape(-1),
+                reduction="none",
+            ).reshape_as(valid)
+            losses["opponent_elixir"] = masked_mean(elixir_error, valid)
 
         belief = observations["public_belief"]
         # An empty rule-consistent posterior is unavailable supervision, not
         # evidence that all eight cards are absent from the opponent's hand.
-        belief_valid = valid & (belief[..., :8].sum(dim=-1) > 0)
-        hand_error = functional.binary_cross_entropy_with_logits(
-            predicted["opponent_hand"], belief[..., :8], reduction="none"
-        ).mean(dim=-1)
-        losses["opponent_hand"] = masked_mean(hand_error, belief_valid)
-        next_card_targets = belief[..., 8:16]
-        next_valid = valid & (next_card_targets.sum(dim=-1) > 0)
-        next_card_targets = next_card_targets / next_card_targets.sum(
-            dim=-1, keepdim=True
-        ).clamp_min(1e-6)
-        next_card_error = -(
-            next_card_targets
-            * functional.log_softmax(
-                predicted["opponent_next_card"], dim=-1
-            )
-        ).sum(dim=-1)
-        losses["opponent_next_card"] = masked_mean(next_card_error, next_valid)
+        if self.auxiliary_weights["opponent_hand"] > 0:
+            belief_valid = valid & (belief[..., :8].sum(dim=-1) > 0)
+            hand_error = functional.binary_cross_entropy_with_logits(
+                predicted["opponent_hand"], belief[..., :8], reduction="none"
+            ).mean(dim=-1)
+            losses["opponent_hand"] = masked_mean(hand_error, belief_valid)
+        if self.auxiliary_weights["opponent_next_card"] > 0:
+            next_card_targets = belief[..., 8:16]
+            next_valid = valid & (next_card_targets.sum(dim=-1) > 0)
+            next_card_targets = next_card_targets / next_card_targets.sum(
+                dim=-1, keepdim=True
+            ).clamp_min(1e-6)
+            next_card_error = -(
+                next_card_targets
+                * functional.log_softmax(
+                    predicted["opponent_next_card"], dim=-1
+                )
+            ).sum(dim=-1)
+            losses["opponent_next_card"] = masked_mean(next_card_error, next_valid)
 
         future = self._sequences(rollout_data.future_targets, sequence_count)
-        future_error = functional.smooth_l1_loss(
-            predicted["future_value"], future[..., 0], reduction="none"
-        )
-        losses["future_value"] = masked_mean(future_error, mask & (future[..., 1] > 0.5))
+        if self.auxiliary_weights["future_value"] > 0:
+            future_error = functional.smooth_l1_loss(
+                predicted["future_value"], future[..., 0], reduction="none"
+            )
+            losses["future_value"] = masked_mean(future_error, mask & (future[..., 1] > 0.5))
         total = sum(
             self.auxiliary_weights[name] * value
             for name, value in losses.items()

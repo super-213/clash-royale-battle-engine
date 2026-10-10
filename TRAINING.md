@@ -125,7 +125,10 @@ belief 通过 cross-attention 连接，同时保留 `32×18` CNN feature map；�
 checkpoint 和消融实验使用。
 
 第六阶段默认同时记录 `train/auxiliary_loss` 以及八个单项 loss，并额外生成
-`charts/auxiliary_losses.svg`。环境从复位前的完整相邻原生状态生成塔血、实体消失/
+`charts/auxiliary_losses.svg`。辅助系数为零或所有任务权重为零时，训练跳过辅助预测和
+损失计算，也不记录这些 loss；单项权重为零时跳过该项损失。预测头参数仍完整保留，
+可供独立推理检查。这样避免无用计算和 `0 × NaN` 污染有效训练目标。
+环境从复位前的完整相邻原生状态生成塔血、实体消失/
 位移及伤害结果标签，独立存入 rollout buffer；终局和 TBPTT 末项也参加监督，padding
 除外。伤害结果按 ID 对齐的非投射物 HP 损失计算，新增单位血量不再抵消已有伤害。
 当前公开估计监督对手圣水区间与卡序 belief；未来局面指标默认使用4个决策后的
@@ -192,7 +195,7 @@ drop_entity_death` 指定包含 `full` 的子集。所有组均使用第 1、2 �
 先准备冻结对手 manifest，格式见
 [`docs/evaluation_opponents.example.json`](docs/evaluation_opponents.example.json)。每个名字
 对应 checkpoint 路径与其原始 algorithm 类；相对路径以 manifest 所在目录为基准，
-可提供 `sha256` 锁定版本。示例指向本地已有的旧 v5 三轮中断模型，适合验证接入；正式
+可提供 `sha256` 锁定版本。示例中的旧 v5 checkpoint 路径需替换为实际可用的文件；正式
 能力验收应加入多个独立训练、不同强度的历史策略。使用相同八张卡组和 observation
 schema，评估模型不注册进本次训练对手池。
 
@@ -312,8 +315,9 @@ SHA-256；所有必要文件写入成功后才发布 `runtime.json`，恢复前�
 缓冲区和优化器状态；该对象仅用于推理。续训使用标准 `algorithm.load`，保留完整优化器。
 每次运行记录 `source_sha256.json`，并在 `summary.json` 中保存启动时的源码哈希；
 训练期间源码发生变化会使运行失效。正式实验汇总同时核验其与计划一致，哈希范围包括
-Python、训练配置、依赖约束和原生 probe 源码。已有旧计划应保留历史记录，使用修复后
-源码重新生成计划；当前计划为 `artifacts/experiments/20261010_static_review_8/plan.json`。
+Python、训练配置、依赖约束和原生 probe 源码。计划须使用修复后的源码重新生成。
+历史实验数据和冻结对手文件已清理，当前工作区没有可执行的正式计划；准备可用的冻结
+对手 checkpoint 后，按上面的 `training_experiments.py plan` 命令重新生成。
 运行时也拒绝含训练产物的输出目录，且独占创建源码记录，防止重试或并发调用覆盖旧运行。
 已准备的 `config.json`、`console.log`、`status.json` 可以保留。
 

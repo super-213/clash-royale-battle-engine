@@ -192,8 +192,7 @@ class NativeHybridExtractor(BaseFeaturesExtractor):
         # and terminal edge cases.
         safe_valid = valid.clone()
         empty = ~safe_valid.any(dim=1)
-        if bool(empty.any()):
-            safe_valid[empty, 0] = True
+        safe_valid[:, 0] |= empty
         tokens = self.entity_projection(observations["entities"])
         tokens = self.entity_transformer(
             tokens,

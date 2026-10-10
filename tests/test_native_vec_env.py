@@ -221,6 +221,35 @@ class HierarchicalDistributionTest(unittest.TestCase):
 
 
 class NativeEntityTargetsTest(unittest.TestCase):
+    def test_entity_encoders_handle_empty_and_nonempty_rows_without_mutating_masks(self):
+        space = vec_module.native_observation_space()
+        encoders = (
+            model_module.NativeHybridExtractor(space, features_dim=16, spatial_channels=8,
+                entity_dim=8, entity_layers=1, entity_heads=4, history_dim=8, card_dim=4),
+            recurrent_module.NativeCrossModalExtractor(space, features_dim=16, spatial_channels=8,
+                cross_dim=8, entity_layers=1, attention_heads=4),
+        )
+        for encoder in encoders:
+            with self.subTest(encoder=type(encoder).__name__):
+                observations = {key: torch.zeros(2, *value.shape) for key, value in space.spaces.items()}
+                observations['entities'] = torch.randn_like(observations['entities'], requires_grad=True)
+                observations['entity_mask'][1, 0] = 1
+                original = observations['entity_mask'].clone()
+                if isinstance(encoder, model_module.NativeHybridExtractor):
+                    pooled = encoder._entity_features(observations)
+                else:
+                    tokens, valid, pooled = encoder._entity_tokens(observations)
+                    self.assertEqual(valid[0].sum().item(), 1)
+                    self.assertEqual(torch.count_nonzero(tokens[0]).item(), 0)
+                torch.testing.assert_close(pooled[0], torch.zeros_like(pooled[0]))
+                self.assertTrue(torch.isfinite(pooled).all())
+                (pooled * torch.arange(1, pooled.shape[1] + 1)).sum().backward()
+                gradient = observations['entities'].grad
+                self.assertTrue(torch.isfinite(gradient).all())
+                self.assertEqual(torch.count_nonzero(gradient[0]).item(), 0)
+                self.assertGreater(gradient[1, 0].abs().sum().item(), 0)
+                torch.testing.assert_close(observations['entity_mask'], original)
+
     def troop(self, identity, x=5000, y=10000):
         return replace(
             make_state(0, 1).entities[0], id=identity, card=vec_module.CARD_IDS[0],
