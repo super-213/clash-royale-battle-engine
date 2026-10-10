@@ -46,7 +46,7 @@
     "TRAINING.md": "789c9c27cbca12d75702b2f509744a2acc2c05b7bbf9b17a6b4ae0382d18409b",
     "auxiliary_validation.py": "2102fc6ffa18b6cb066fb90fcb86a00458803ac54cc749355596ca50e55ea7af",
     "batch.py": "08e874a0e4cf93a42759ba599b4fd2c2cf2878e70aba43d6deb17ed861b1a1d8",
-    "docs/essay/paper.md": "eb220df6f5a0f488e5b04272d1259d3dc26527891f5b979aab36548017a719d1",
+    "docs/essay/paper.md": "a5844edc13ac67ef90c9a6125934bd705f5dcb0f2b15e9465fc5782caad52588",
     "engine.py": "79b05f200b2a4dfc9c807a7562aa99c7b86de4727ed51dfb90cd1d95030245fb",
     "fixed_evaluation.py": "bd6591a6e3916487fab81743d69f006c66784b4ab770baef58fdac44277e9d82",
     "native_cross_modal.py": "c8cf4c6ce2e5a77acc9790e94a4fe56159b8a7e1235d4c980cfd4b41a3dd2a4f",
@@ -73,7 +73,11 @@
     "vendor/firstlight/NOTICE": "1d304a6d3243fd6629e2127903729eba05f930669a9e318a674ad62b90cf43ba",
     "vendor/firstlight/probe/minimal_capture.inc": "8cacb5d7f80c2a09b2ad29b98f64ad6d878f760555bc74f94e4c458108b2b347",
     "policy_contracts.py": "39196603c60a23fe44001894bdf8a547a8d4d7e24d6995528468c061e3f2097f",
-    "tests/test_native_vec_env.py": "94b1be369c14f2684816907cee035ad633a845471be2102c742e0ba44c6cc603"
+    "tests/test_native_vec_env.py": "94b1be369c14f2684816907cee035ad633a845471be2102c742e0ba44c6cc603",
+    "docs/essay/README.md": "f03edd19446f435a7d7e0cf23c36d500b296d26ef3139a24ad3d1d1cdb0b3fc3",
+    "docs/essay/generate_figures.py": "a1a487c25c429769eac37451d21420d193c2c0494503e76ada265ee078e76d30",
+    "docs/essay/photo/fig04_worked_example.png": "1788a64650a68d3df23da2dc936f67ce1f8132e3d6d42e02520161b9a495f60c",
+    "docs/essay/photo/fig04_worked_example.svg": "4994e5e22bd8a7dbb3b7129af13df2e63b9e9b30e7073fb67eb12bbf32a8013d"
   },
   "primary_reference_urls": [
     "https://arxiv.org/abs/1707.06347",
@@ -352,5 +356,66 @@
     "mps_available": false,
     "native_runtime": "Not exercised in this review; no strategy or measured throughput claims.",
     "compatibility": "Network dimensions, RNG consumption and checkpoint schemas unchanged; custom and model opponents still receive full observations."
+  },
+  "worked_example_revision": {
+    "state_source": "Synthetic partial native-state fixtures; not a replayable standard-opening trajectory or native battle.",
+    "device": "cpu",
+    "native_runtime_exercised": false,
+    "policy_parameters": 1824036,
+    "shapes": {
+      "cards": [
+        1,
+        4,
+        64
+      ],
+      "placements": [
+        1,
+        576,
+        64
+      ],
+      "heatmaps": [
+        1,
+        4,
+        32,
+        18
+      ],
+      "actor_hidden": [
+        1,
+        1,
+        256
+      ]
+    },
+    "checked": [
+      "public elixir, first-opponent-play cycle belief and history fields",
+      "spatial cell, temporal changes and deployment mask counts",
+      "p0/p1 command conversion",
+      "ID-aligned survival/disappearance labels and executed action identity",
+      "default v6 finite forward and tensor shapes",
+      "artificial masked slot probabilities and two-stage deterministic selection"
+    ],
+    "numeric_tolerance": 1e-06,
+    "assumed_slot_probabilities": [
+      0.18,
+      0.6,
+      0,
+      0.08,
+      0.14
+    ],
+    "assumed_action": [
+      1,
+      12,
+      3
+    ],
+    "probability_source": "Manually constructed example, not a checkpoint prediction.",
+    "date": "2026-10-10",
+    "paper_section": "4.9.1–4.9.8",
+    "figure": "docs/essay/photo/fig04_worked_example",
+    "document_sha256": {
+      "docs/essay/paper.md": "a5844edc13ac67ef90c9a6125934bd705f5dcb0f2b15e9465fc5782caad52588",
+      "docs/essay/README.md": "f03edd19446f435a7d7e0cf23c36d500b296d26ef3139a24ad3d1d1cdb0b3fc3",
+      "docs/essay/generate_figures.py": "a1a487c25c429769eac37451d21420d193c2c0494503e76ada265ee078e76d30",
+      "docs/essay/photo/fig04_worked_example.png": "1788a64650a68d3df23da2dc936f67ce1f8132e3d6d42e02520161b9a495f60c",
+      "docs/essay/photo/fig04_worked_example.svg": "4994e5e22bd8a7dbb3b7129af13df2e63b9e9b30e7073fb67eb12bbf32a8013d"
+    }
   }
 }

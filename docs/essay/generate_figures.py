@@ -62,7 +62,10 @@ def arrow(ax, points, color="line", dashed=False, label=None):
 
 def save(fig, name):
     for ext in ("svg", "png"):
-        fig.savefig(OUT / f"{name}.{ext}", dpi=220)
+        output = OUT / f"{name}.{ext}"
+        fig.savefig(output, dpi=220)
+        if ext == "svg":
+            output.write_text("\n".join(line.rstrip() for line in output.read_text().splitlines()) + "\n")
     plt.close(fig)
 
 
@@ -155,10 +158,11 @@ def supervision():
 
 
 def example():
-    fig = plt.figure(figsize=(14,9),facecolor="white")
-    fig.text(.04,.95,"04  Worked example: from an entity to an executed action",fontsize=19,weight="bold",color=C["ink"])
-    fig.text(.04,.905,"Constructed input, not a native replay. The defensive action is assumed, not a measured policy output.",fontsize=11,color=C["muted"])
-    a=fig.add_axes([.055,.12,.33,.72])
+    fig = plt.figure(figsize=(15,11),facecolor="white")
+    fig.text(.04,.96,"04  Worked example: opponent play -> next decision -> native action",fontsize=18,weight="bold",color=C["ink"])
+    fig.text(.04,.925,"Constructed state; assumed probabilities and placement. No trained-policy or native-battle result is shown.",fontsize=11,color=C["muted"])
+    fig.text(.05,.86,"Previous boundary: tick 490\nOpponent Giant accepted: tick 491\nLearner observes the result: tick 500",fontsize=12,color=C["ink"],linespacing=1.6)
+    a=fig.add_axes([.055,.19,.31,.59])
     a.set(xlim=(0,18),ylim=(0,32),xlabel="x (tiles)",ylabel="y (tiles)")
     a.set_aspect("equal")
     a.set_xticks(np.arange(0,19,3)); a.set_yticks(np.arange(0,33,4))
@@ -167,22 +171,28 @@ def example():
     a.axhspan(15,17,color="#d8ebf8",alpha=.9)
     a.text(10,16,"River",va="center",color=C["blue"],fontsize=10)
     a.add_patch(Rectangle((3,12),1,1,fc="#bbddd5",ec=C["teal"],lw=2,zorder=3))
-    a.add_patch(Circle((3.5,14),.47,color=C["red"],zorder=4))
+    a.add_patch(Circle((3.5,18.5),.47,color=C["red"],zorder=4))
     a.add_patch(Rectangle((2.9,5.9),1.2,1.2,fc=C["blue"],zorder=4))
-    a.annotate("Enemy Giant\n(3.5, 14.0)",xy=(4,14),xytext=(7,12.4),fontsize=10,color=C["red"],arrowprops={"arrowstyle":"-","color":C["red"]})
+    a.annotate("Enemy Giant\n(3.5, 18.5)",xy=(4,18.5),xytext=(7,21.5),fontsize=10,color=C["red"],arrowprops={"arrowstyle":"-","color":C["red"]})
     a.annotate("Own tower\n(3.5, 6.5)",xy=(4.1,6.5),xytext=(7,5.2),fontsize=10,color=C["blue"],arrowprops={"arrowstyle":"-","color":C["blue"]})
     a.annotate("Assumed placement\n(3.5, 12.5)",xy=(3.5,12.5),xytext=(7,9.2),fontsize=10,color=C["teal"],arrowprops={"arrowstyle":"-","color":C["teal"]})
     a.set_title("Egocentric 18 x 32 arena",fontsize=12,pad=14)
-    ax=fig.add_axes([.43,.075,.54,.78]);ax.set(xlim=(0,1),ylim=(0,1));ax.axis("off")
-    box(ax,.015,.78,.97,.17,"Raw state -> normalized observations",
-        "tick 690 -> 30.0 s; own elixir 40,000 -> 0.4\nGiant HP 1,200 / 2,000 -> 0.6; x/y -> 0.19444 / 0.4375",fs=12)
-    box(ax,.015,.55,.97,.16,"Parallel encodings",
-        "Spatial cell [14, 3] + entity token + public history\nHand [8, 7, 5, 6, 1]; Giant card (5 elixir) masked",fs=12)
-    box(ax,.015,.32,.97,.16,"Contextual reasoning + recurrent state",
-        "576 spatial tokens; entities / history / belief / cards\n384-d summary -> 256-d fusion -> Actor LSTM",fs=12)
-    box(ax,.015,.09,.97,.16,"Assumed action -> native command",
-        "[1, 12, 3] -> Mini P.E.K.K.A at (3,500, 12,500)\nNext interval: 10 ticks = 0.5 s; save receipt and new state",color="teal",fs=12)
-    for y in (.78,.55,.32):arrow(ax,[(.5,y),(.5,y-.07)])
+    fig.text(.05,.065,"Own hand: Mini P.E.K.K.A / Giant / Fireball / Archers\nOwn elixir: 4; next card: Knight\nGiant HP 3,000 / 3,000 and deployment 500 ms are illustrative.",fontsize=10.5,color=C["muted"],linespacing=1.6)
+    ax=fig.add_axes([.415,.075,.56,.82]);ax.set(xlim=(0,1),ylim=(0,1));ax.axis("off")
+    box(ax,.015,.84,.97,.12,"1  Confirm play -> update public ledger",
+        "Giant: cost 5, event tick 491; capture tick 500 (20.50 s)\nOpponent elixir estimate: 10 - 5 + 0.45 / 2.8 = 5.160714",fs=12)
+    box(ax,.015,.68,.97,.12,"2  Build complementary observations",
+        "Spatial cell [18, 3] + entity + history + temporal changes\nHand [8, 6, 5, 2, 1]; Giant belief = 0; other hand beliefs = 4/7",fs=12)
+    box(ax,.015,.52,.97,.12,"3  Encode context -> carry recurrent memory",
+        "CNN: 576 x 64; entities -> history -> belief -> card queries\n384-d summaries -> 256-d fusion -> persistent Actor / Critic LSTMs",fs=12)
+    box(ax,.015,.36,.97,.12,"4  Mask -> select slot -> conditional placement",
+        "Assumed P(wait, Mini, Giant, Fireball, Archers) = (.18, .60, 0, .08, .14)\nFour 32 x 18 heatmaps; assume Mini's best legal tile is [12, 3]",color="teal",fs=12)
+    box(ax,.015,.20,.97,.12,"5  Convert action -> execute -> next observation",
+        "[1, 12, 3] -> Play(owner=0, slot=0, x=3500, y=12500)\nDeploy next tick; advance to tick 510; keep per-slot recurrent memory",color="teal",fs=12)
+    box(ax,.015,.04,.97,.12,"6  Training only: supervise observed consequences",
+        "Accepted card + submitted coordinates; ID-matched transition labels\nStore labels separately; combine PPO and auxiliary loss after rollout",color="purple",fs=12)
+    for y in (.84,.68,.52,.36):arrow(ax,[(.5,y),(.5,y-.04)])
+    arrow(ax,[(.5,.20),(.5,.16)],color="purple",dashed=True)
     save(fig,"fig04_worked_example")
 
 
