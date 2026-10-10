@@ -686,7 +686,10 @@ class FixedEvaluationCallback(BaseCallback):
         return True
 
     def _on_training_end(self):
-        from training_runtime import load_inference_model
+        from training_runtime import load_inference_model, completed_update_at_training_end
+
+        if not completed_update_at_training_end(self.model, self.rollout_decisions):
+            return
 
         completed = int(self.num_timesteps // self.rollout_decisions)
         self._schedule(completed)

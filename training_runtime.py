@@ -160,6 +160,11 @@ def restore_resume_state(checkpoint, env, pool=None, telemetry=None):
         torch.cuda.set_rng_state_all(rng["cuda"])
 
 
+def completed_update_at_training_end(model, rollout_decisions):
+    """SB3 calls training_end after a cancelled rollout too, before train()."""
+    return model.rollout_buffer.full and model.num_timesteps % rollout_decisions == 0
+
+
 class UpdatedCheckpointCallback(BaseCallback):
     """Save after PPO updates, at the next rollout boundary or training end."""
 
@@ -192,7 +197,7 @@ class UpdatedCheckpointCallback(BaseCallback):
     def _on_training_end(self):
         # Runs before deferred evaluation, so an evaluation failure cannot lose
         # the final completed optimizer update or its resumable league state.
-        if self.model.rollout_buffer.full:
+        if completed_update_at_training_end(self.model, int(self.config["rollout_decisions"])):
             self.last_completed_timesteps = self.model.num_timesteps
             self._save_completed(force=True)
 
@@ -432,7 +437,8 @@ class TrainingTelemetryCallback(BaseCallback):
         self.last_recorded_timesteps = self.model.num_timesteps
 
     def _on_training_end(self):
-        self._record("training_end")
+        if completed_update_at_training_end(self.model, self.rollout_decisions):
+            self._record("training_end")
 
 
 def _finite_points(records, key):
@@ -601,7 +607,8 @@ def _sha256(path):
     return digest.hexdigest()
 
 
-def _model_metadata(model, model_path, config, elapsed, telemetry, status, source_sha256=None):
+def _model_metadata(model, model_path, config, elapsed, telemetry, status, source_sha256=None,
+                    completed_timesteps=0):
     parameter_count = sum(parameter.numel() for parameter in model.policy.parameters())
     trainable_count = sum(
         parameter.numel() for parameter in model.policy.parameters() if parameter.requires_grad
@@ -613,7 +620,7 @@ def _model_metadata(model, model_path, config, elapsed, telemetry, status, sourc
         "elapsed_seconds": round(elapsed, 3),
         "elapsed_human": time.strftime("%H:%M:%S", time.gmtime(elapsed)),
         "planned_rounds": int(config["rounds"]),
-        "completed_rounds": int(math.ceil(model.num_timesteps / config["rollout_decisions"])),
+        "completed_rounds": int(completed_timesteps // config["rollout_decisions"]),
         "timesteps": int(model.num_timesteps),
         "resume_from": config.get("resume_from"),
         "episodes": telemetry.episode_count,
@@ -1081,7 +1088,8 @@ def _run_sb3_training(config, run_dir, resources):
         elapsed = time.monotonic() - started
         generate_charts(run_dir, telemetry.records)
         metadata = _model_metadata(
-            model, model_path, config, elapsed, telemetry, status="completed", source_sha256=source_at_start
+            model, model_path, config, elapsed, telemetry, status="completed", source_sha256=source_at_start,
+            completed_timesteps=checkpoint.last_completed_timesteps,
         )
         if self_play_pool is not None:
             metadata["self_play"] = self_play_pool.summary()
@@ -1120,7 +1128,9 @@ def _run_sb3_training(config, run_dir, resources):
                 save_resume_state(interrupted_path, model, config, self_play_pool, telemetry)
             generate_charts(run_dir, telemetry.records)
             metadata = _model_metadata(
-                model, interrupted_path, config, elapsed, telemetry, status="interrupted", source_sha256=source_at_start
+                model, interrupted_path, config, elapsed, telemetry, status="interrupted", source_sha256=source_at_start,
+                completed_timesteps=(checkpoint.last_completed_timesteps
+                                     if checkpoint.last_completed_timesteps is not None else initial_timesteps),
             )
             if self_play_pool is not None:
                 metadata["self_play"] = self_play_pool.summary()

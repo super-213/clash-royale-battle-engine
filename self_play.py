@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from stable_baselines3.common.callbacks import BaseCallback
-from training_runtime import load_inference_model, _sha256
+from training_runtime import load_inference_model, _sha256, completed_update_at_training_end
 
 
 def _timestamp():
@@ -27,6 +27,12 @@ def _atomic_json(path, payload):
         encoding="utf-8",
     )
     temporary.replace(path)
+
+
+def _validate_snapshot_id(snapshot_id):
+    if (not snapshot_id or snapshot_id in {"random", "current", ".", ".."}
+            or "/" in snapshot_id or "\\" in snapshot_id):
+        raise ValueError(f"invalid historical snapshot id: {snapshot_id!r}")
 
 
 class SelfPlayOpponentPool:
@@ -148,17 +154,25 @@ class SelfPlayOpponentPool:
 
     def register_snapshot(self, snapshot_id, path, round_number):
         snapshot_id = str(snapshot_id)
+        _validate_snapshot_id(snapshot_id)
         path = Path(path).resolve()
         if not path.is_file():
             raise FileNotFoundError(path)
-        if any(item["id"] == snapshot_id for item in self.snapshots):
+        if snapshot_id in self._retired_snapshots:
+            raise ValueError(f"historical snapshot id is still retired: {snapshot_id}")
+        digest = _sha256(path)
+        previous = self._snapshot_entry(snapshot_id)
+        if previous is not None:
+            if (previous["path"] != str(path) or previous["round"] != int(round_number)
+                    or previous.get("sha256") != digest):
+                raise ValueError(f"historical snapshot identity changed: {snapshot_id}")
             return
         entry = {
             "id": snapshot_id,
             "path": str(path),
             "round": int(round_number),
             "created_at": _timestamp(),
-            "sha256": _sha256(path),
+            "sha256": digest,
         }
         self.snapshots.append(entry)
         self.ratings.setdefault(snapshot_id, self.learner_elo)
@@ -445,7 +459,14 @@ class SelfPlayOpponentPool:
     def restore_state(self, directory):
         directory = Path(directory)
         saved = json.loads((directory / "state.json").read_text())
+        snapshot_ids = set()
         for entry in saved["snapshots"]:
+            _validate_snapshot_id(entry["id"])
+            if entry["id"] in snapshot_ids:
+                raise ValueError(f"duplicate resume historical snapshot id: {entry['id']}")
+            snapshot_ids.add(entry["id"])
+            if entry["path"] != f"{entry['id']}.zip":
+                raise ValueError(f"invalid resume historical snapshot path: {entry['id']}")
             source = directory / entry["path"]
             if not source.is_file():
                 raise ValueError(f"resume historical snapshot is missing: {entry['id']}")
@@ -561,9 +582,11 @@ class SelfPlaySnapshotCallback(BaseCallback):
         return True
 
     def _on_training_end(self):
+        if not completed_update_at_training_end(self.model, self.rollout_decisions):
+            return
         completed = int(self.num_timesteps // self.rollout_decisions)
         self.pool.set_learner_generation(completed)
-        self.save_snapshot(completed or self.final_round)
+        self.save_snapshot(completed)
 
 
 __all__ = ["SelfPlayOpponentPool", "SelfPlaySnapshotCallback"]

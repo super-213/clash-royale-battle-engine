@@ -259,6 +259,35 @@ class TrainingFixesTest(unittest.TestCase):
             model = NativeActionConditionedWorldModelPPO.load(Path(directory) / 'final_model.zip', device='cpu')
             self.assertTrue(all(torch.isfinite(value).all() for value in model.policy.parameters()))
 
+    def test_v4_singleton_minibatches_keep_parameters_finite(self):
+        from training_experiments import variant_config
+        from native_engine.native_recurrent_model import NativeRecurrentPPO
+        for batch_size in (7, 1):
+            with self.subTest(batch_size=batch_size), TemporaryDirectory() as directory:
+                config = variant_config(self.config(), 'v4')
+                config.update(rounds=1, batch_size=batch_size)
+                self.train(directory, config)
+                model = NativeRecurrentPPO.load(Path(directory) / 'final_model.zip', device='cpu')
+                self.assertTrue(all(torch.isfinite(value).all() for value in model.policy.parameters()))
+
+    def test_shared_ppo_update_matches_upstream_for_regular_v4_batches(self):
+        from sb3_contrib import RecurrentPPO
+        from training_experiments import variant_config
+        from native_engine.native_recurrent_model import NativeRecurrentPPO
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = variant_config(self.config(), 'v4')
+            config.update(rounds=1, epochs=2)
+            config['algorithm_kwargs'].update(clip_range_vf=.2, target_kl=.03)
+            self.train(root / 'shared', config)
+            with patch.object(NativeRecurrentPPO, 'train', RecurrentPPO.train):
+                self.train(root / 'upstream', config)
+            shared = NativeRecurrentPPO.load(root / 'shared/final_model.zip', device='cpu')
+            upstream = NativeRecurrentPPO.load(root / 'upstream/final_model.zip', device='cpu')
+            self.assertEqual(shared._n_updates, upstream._n_updates)
+            for name, value in shared.policy.state_dict().items():
+                torch.testing.assert_close(value, upstream.policy.state_dict()[name], rtol=0, atol=0)
+
     def test_historical_checkpoint_loading_preserves_real_rng_streams(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -471,6 +500,40 @@ class TrainingFixesTest(unittest.TestCase):
                 self.assertFalse((root / 'final_model.zip').exists())
                 completed = root / 'checkpoints/model_8_steps.zip'
                 self.assertEqual(read_resume_state(completed)['timesteps'], 8)
+
+    def test_cancelled_rollouts_do_not_publish_unupdated_round_artifacts(self):
+        for stop_at in (2, 16):
+            for separate in (False, True):
+                with self.subTest(stop_at=stop_at, separate=separate), TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    config = dict(self.config(), self_play_enabled=True, self_play_current_ratio=0,
+                                  self_play_historical_ratio=1, fixed_evaluation_enabled=True, port=101)
+                    if separate:
+                        config['evaluation_port'] = 102
+                    original = TrainingTelemetryCallback._on_step
+                    def stop(callback):
+                        original(callback)
+                        return callback.num_timesteps != stop_at
+                    with patch.object(TrainingTelemetryCallback, '_on_step', stop):
+                        with self.assertRaisesRegex(ValueError, 'before completing'):
+                            self.train(root, config)
+                    completed = 0 if stop_at == 2 else 1
+                    summary = json.loads((root / 'summary.json').read_text())
+                    self.assertEqual(summary['completed_rounds'], completed)
+                    snapshots = list((root / 'self_play/snapshots').glob('*.zip'))
+                    self.assertEqual({path.stem for path in snapshots},
+                                     {f'snapshot_round_{i:06d}' for i in range(completed + 1)})
+                    for path in snapshots:
+                        model = NativeActionConditionedWorldModelPPO.load(path, device='cpu')
+                        self.assertEqual(model._n_updates, int(path.stem.rsplit('_', 1)[1]))
+                    self.assertFalse((root / f'evaluation/checkpoints/round_{completed + 1:06d}.zip').exists())
+                    metrics = root / 'metrics.jsonl'
+                    records = [json.loads(line) for line in metrics.read_text().splitlines()] if metrics.exists() else []
+                    self.assertTrue(all(row['round'] <= completed for row in records))
+                    matches = root / 'evaluation/matches.jsonl'
+                    if matches.exists():
+                        self.assertTrue(all(json.loads(line)['round'] <= completed
+                                            for line in matches.read_text().splitlines()))
 
     def test_resume_manifest_is_last_and_checks_rng_config_and_league(self):
         with TemporaryDirectory() as directory:

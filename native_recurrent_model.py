@@ -282,9 +282,10 @@ class ActionTargetRecurrentDictRolloutBuffer(EntityTargetRecurrentDictRolloutBuf
 
 
 class NativeRecurrentPPO(RecurrentPPO):
-    """Official RecurrentPPO using the project's fixed-length TBPTT buffer."""
+    """Masked recurrent PPO with fixed-length TBPTT and singleton-safe updates."""
 
     native_rollout_buffer_class = TruncatedRecurrentDictRolloutBuffer
+    has_auxiliary_tasks = False
 
     def __init__(self, *args, tbptt_steps=32, **kwargs):
         self.tbptt_steps = int(tbptt_steps)
@@ -317,7 +318,153 @@ class NativeRecurrentPPO(RecurrentPPO):
         )
 
     def train(self):
-        super().train()
+        self.policy.set_training_mode(True)
+        self._update_learning_rate(self.policy.optimizer)
+        clip_range = self.clip_range(self._current_progress_remaining)
+        if self.clip_range_vf is not None:
+            clip_range_vf = self.clip_range_vf(
+                self._current_progress_remaining
+            )
+
+        entropy_losses = []
+        pg_losses, value_losses, clip_fractions = [], [], []
+        auxiliary_totals = []
+        auxiliary_tasks = self.DEFAULT_AUXILIARY_WEIGHTS if self.has_auxiliary_tasks else ()
+        auxiliary_records = {name: [] for name in auxiliary_tasks}
+        continue_training = True
+        approx_kl_divs = []
+        loss = torch.zeros((), device=self.device)
+
+        for epoch in range(self.n_epochs):
+            approx_kl_divs = []
+            for rollout_data in self.rollout_buffer.get(self.batch_size):
+                actions = rollout_data.actions
+                if isinstance(self.action_space, spaces.Discrete):
+                    actions = actions.long().flatten()
+                mask = rollout_data.mask > 1e-8
+                values, log_prob, entropy = self.policy.evaluate_actions(
+                    rollout_data.observations,
+                    actions,
+                    rollout_data.lstm_states,
+                    rollout_data.episode_starts,
+                )
+                task_losses = {}
+                if self.has_auxiliary_tasks:
+                    if self.action_conditioned:
+                        predictions = self.policy.auxiliary_predictions(
+                            executed_actions=rollout_data.executed_actions
+                        )
+                    else:
+                        predictions = self.policy.auxiliary_predictions()
+                    auxiliary_loss, task_losses = self._auxiliary_losses(
+                        rollout_data, predictions
+                    )
+                values = values.flatten()
+                advantages = rollout_data.advantages
+                # Direct Python callers may use a minibatch size that leaves
+                # one sample. Unbiased std on that singleton is NaN.
+                if self.normalize_advantage and advantages[mask].numel() > 1:
+                    advantages = (
+                        advantages - advantages[mask].mean()
+                    ) / (advantages[mask].std() + 1e-8)
+                ratio = torch.exp(log_prob - rollout_data.old_log_prob)
+                policy_loss_1 = advantages * ratio
+                policy_loss_2 = advantages * torch.clamp(
+                    ratio, 1 - clip_range, 1 + clip_range
+                )
+                policy_loss = -torch.mean(
+                    torch.min(policy_loss_1, policy_loss_2)[mask]
+                )
+                pg_losses.append(policy_loss.item())
+                clip_fractions.append(torch.mean(
+                    (torch.abs(ratio - 1) > clip_range).float()[mask]
+                ).item())
+
+                if self.clip_range_vf is None:
+                    values_pred = values
+                else:
+                    values_pred = rollout_data.old_values + torch.clamp(
+                        values - rollout_data.old_values,
+                        -clip_range_vf,
+                        clip_range_vf,
+                    )
+                value_loss = torch.mean(
+                    ((rollout_data.returns - values_pred) ** 2)[mask]
+                )
+                value_losses.append(value_loss.item())
+                entropy_loss = (
+                    -torch.mean(-log_prob[mask])
+                    if entropy is None
+                    else -torch.mean(entropy[mask])
+                )
+                entropy_losses.append(entropy_loss.item())
+                loss = (
+                    policy_loss
+                    + self.ent_coef * entropy_loss
+                    + self.vf_coef * value_loss
+                )
+                if self.has_auxiliary_tasks:
+                    loss = loss + self.auxiliary_coef * auxiliary_loss
+                    auxiliary_totals.append(auxiliary_loss.item())
+                for name, value in task_losses.items():
+                    auxiliary_records[name].append(value.item())
+
+                with torch.no_grad():
+                    log_ratio = log_prob - rollout_data.old_log_prob
+                    approx_kl_div = torch.mean(
+                        ((torch.exp(log_ratio) - 1) - log_ratio)[mask]
+                    ).cpu().numpy()
+                    approx_kl_divs.append(approx_kl_div)
+                if (
+                    self.target_kl is not None
+                    and approx_kl_div > 1.5 * self.target_kl
+                ):
+                    continue_training = False
+                    if self.verbose >= 1:
+                        print(
+                            f"Early stopping at step {epoch} due to "
+                            f"reaching max kl: {approx_kl_div:.2f}"
+                        )
+                    break
+
+                self.policy.optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    self.policy.parameters(), self.max_grad_norm
+                )
+                self.policy.optimizer.step()
+            self._n_updates += 1
+            if not continue_training:
+                break
+
+        explained_var = explained_variance(
+            self.rollout_buffer.values.flatten(),
+            self.rollout_buffer.returns.flatten(),
+        )
+        self.logger.record("train/entropy_loss", np.mean(entropy_losses))
+        self.logger.record("train/policy_gradient_loss", np.mean(pg_losses))
+        self.logger.record("train/value_loss", np.mean(value_losses))
+        self.logger.record("train/approx_kl", np.mean(approx_kl_divs))
+        self.logger.record("train/clip_fraction", np.mean(clip_fractions))
+        self.logger.record("train/loss", loss.item())
+        self.logger.record("train/explained_variance", explained_var)
+        if self.has_auxiliary_tasks:
+            self.logger.record("train/auxiliary_loss", np.mean(auxiliary_totals))
+        for name, values in auxiliary_records.items():
+            self.logger.record(
+                f"train/aux_{name}_loss",
+                np.mean(values) if values else 0.0,
+            )
+        if hasattr(self.policy, "log_std"):
+            self.logger.record(
+                "train/std", torch.exp(self.policy.log_std).mean().item()
+            )
+        self.logger.record(
+            "train/n_updates", self._n_updates, exclude="tensorboard"
+        )
+        self.logger.record("train/clip_range", clip_range)
+        if self.clip_range_vf is not None:
+            self.logger.record("train/clip_range_vf", clip_range_vf)
         self.logger.record("train/tbptt_steps", self.tbptt_steps)
         self.logger.record(
             "train/recurrent_sequence_max",
@@ -329,6 +476,7 @@ class NativeWorldModelPPO(NativeRecurrentPPO):
     """Recurrent PPO jointly optimized with leakage-free auxiliary tasks."""
 
     native_rollout_buffer_class = EntityTargetRecurrentDictRolloutBuffer
+    has_auxiliary_tasks = True
     action_conditioned = False
 
     def _update_info_buffer(self, infos, dones=None):
@@ -470,159 +618,6 @@ class NativeWorldModelPPO(NativeRecurrentPPO):
             for name, value in losses.items()
         )
         return total, losses
-
-    def train(self):
-        self.policy.set_training_mode(True)
-        self._update_learning_rate(self.policy.optimizer)
-        clip_range = self.clip_range(self._current_progress_remaining)
-        if self.clip_range_vf is not None:
-            clip_range_vf = self.clip_range_vf(
-                self._current_progress_remaining
-            )
-
-        entropy_losses = []
-        pg_losses, value_losses, clip_fractions = [], [], []
-        auxiliary_totals = []
-        auxiliary_records = {
-            name: [] for name in self.DEFAULT_AUXILIARY_WEIGHTS
-        }
-        continue_training = True
-        approx_kl_divs = []
-        loss = torch.zeros((), device=self.device)
-
-        for epoch in range(self.n_epochs):
-            approx_kl_divs = []
-            for rollout_data in self.rollout_buffer.get(self.batch_size):
-                actions = rollout_data.actions
-                if isinstance(self.action_space, spaces.Discrete):
-                    actions = actions.long().flatten()
-                mask = rollout_data.mask > 1e-8
-                values, log_prob, entropy = self.policy.evaluate_actions(
-                    rollout_data.observations,
-                    actions,
-                    rollout_data.lstm_states,
-                    rollout_data.episode_starts,
-                )
-                if self.action_conditioned:
-                    predictions = self.policy.auxiliary_predictions(
-                        executed_actions=rollout_data.executed_actions
-                    )
-                else:
-                    predictions = self.policy.auxiliary_predictions()
-                auxiliary_loss, task_losses = self._auxiliary_losses(
-                    rollout_data, predictions
-                )
-                values = values.flatten()
-                advantages = rollout_data.advantages
-                # Direct Python callers may use a minibatch size that leaves
-                # one sample. Unbiased std on that singleton is NaN.
-                if self.normalize_advantage and advantages[mask].numel() > 1:
-                    advantages = (
-                        advantages - advantages[mask].mean()
-                    ) / (advantages[mask].std() + 1e-8)
-                ratio = torch.exp(log_prob - rollout_data.old_log_prob)
-                policy_loss_1 = advantages * ratio
-                policy_loss_2 = advantages * torch.clamp(
-                    ratio, 1 - clip_range, 1 + clip_range
-                )
-                policy_loss = -torch.mean(
-                    torch.min(policy_loss_1, policy_loss_2)[mask]
-                )
-                pg_losses.append(policy_loss.item())
-                clip_fractions.append(torch.mean(
-                    (torch.abs(ratio - 1) > clip_range).float()[mask]
-                ).item())
-
-                if self.clip_range_vf is None:
-                    values_pred = values
-                else:
-                    values_pred = rollout_data.old_values + torch.clamp(
-                        values - rollout_data.old_values,
-                        -clip_range_vf,
-                        clip_range_vf,
-                    )
-                value_loss = torch.mean(
-                    ((rollout_data.returns - values_pred) ** 2)[mask]
-                )
-                value_losses.append(value_loss.item())
-                entropy_loss = (
-                    -torch.mean(-log_prob[mask])
-                    if entropy is None
-                    else -torch.mean(entropy[mask])
-                )
-                entropy_losses.append(entropy_loss.item())
-                loss = (
-                    policy_loss
-                    + self.ent_coef * entropy_loss
-                    + self.vf_coef * value_loss
-                    + self.auxiliary_coef * auxiliary_loss
-                )
-                auxiliary_totals.append(auxiliary_loss.item())
-                for name, value in task_losses.items():
-                    auxiliary_records[name].append(value.item())
-
-                with torch.no_grad():
-                    log_ratio = log_prob - rollout_data.old_log_prob
-                    approx_kl_div = torch.mean(
-                        ((torch.exp(log_ratio) - 1) - log_ratio)[mask]
-                    ).cpu().numpy()
-                    approx_kl_divs.append(approx_kl_div)
-                if (
-                    self.target_kl is not None
-                    and approx_kl_div > 1.5 * self.target_kl
-                ):
-                    continue_training = False
-                    if self.verbose >= 1:
-                        print(
-                            f"Early stopping at step {epoch} due to "
-                            f"reaching max kl: {approx_kl_div:.2f}"
-                        )
-                    break
-
-                self.policy.optimizer.zero_grad()
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(
-                    self.policy.parameters(), self.max_grad_norm
-                )
-                self.policy.optimizer.step()
-            self._n_updates += 1
-            if not continue_training:
-                break
-
-        explained_var = explained_variance(
-            self.rollout_buffer.values.flatten(),
-            self.rollout_buffer.returns.flatten(),
-        )
-        self.logger.record("train/entropy_loss", np.mean(entropy_losses))
-        self.logger.record("train/policy_gradient_loss", np.mean(pg_losses))
-        self.logger.record("train/value_loss", np.mean(value_losses))
-        self.logger.record("train/approx_kl", np.mean(approx_kl_divs))
-        self.logger.record("train/clip_fraction", np.mean(clip_fractions))
-        self.logger.record("train/loss", loss.item())
-        self.logger.record("train/explained_variance", explained_var)
-        self.logger.record(
-            "train/auxiliary_loss", np.mean(auxiliary_totals)
-        )
-        for name, values in auxiliary_records.items():
-            self.logger.record(
-                f"train/aux_{name}_loss",
-                np.mean(values) if values else 0.0,
-            )
-        if hasattr(self.policy, "log_std"):
-            self.logger.record(
-                "train/std", torch.exp(self.policy.log_std).mean().item()
-            )
-        self.logger.record(
-            "train/n_updates", self._n_updates, exclude="tensorboard"
-        )
-        self.logger.record("train/clip_range", clip_range)
-        if self.clip_range_vf is not None:
-            self.logger.record("train/clip_range_vf", clip_range_vf)
-        self.logger.record("train/tbptt_steps", self.tbptt_steps)
-        self.logger.record(
-            "train/recurrent_sequence_max",
-            self.rollout_buffer.max_sampled_sequence_length,
-        )
 
 
 class NativeActionConditionedWorldModelPPO(NativeWorldModelPPO):

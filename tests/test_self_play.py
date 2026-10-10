@@ -81,6 +81,41 @@ class SelfPlayOpponentPoolTest(unittest.TestCase):
             pool.close()
             restored.close()
 
+    def test_snapshot_ids_cannot_alias_categories_or_change_identity(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            first, second = root / 'first.zip', root / 'second.zip'
+            first.write_bytes(b'first')
+            second.write_bytes(b'second')
+            pool = SelfPlayOpponentPool(root, FakeAlgorithm, 'cpu', 1,
+                                       current_ratio=0, historical_ratio=1, snapshot_pool_size=1)
+            for name in ('random', 'current', '', '..', '../first', 'nested/first', 'nested\\first'):
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    pool.register_snapshot(name, first, 0)
+            pool.register_snapshot('first', first, 0)
+            pool.register_snapshot('first', first, 0)
+            self.assertEqual(len(pool.snapshots), 1)
+            for path, round_number in ((second, 0), (first, 1)):
+                with self.assertRaisesRegex(ValueError, 'identity'):
+                    pool.register_snapshot('first', path, round_number)
+            pool.on_episode_start(0, 0, 0, 0)
+            pool.register_snapshot('second', second, 1)
+            with self.assertRaisesRegex(ValueError, 'retired'):
+                pool.register_snapshot('first', second, 2)
+            self.assertEqual(pool._snapshot_entry('first')['path'], str(first.resolve()))
+            pool.predict(observations(1))
+            self.assertEqual(FakeAlgorithm.loads[-1][0], str(first.resolve()))
+            pool.save_state(root / 'saved')
+            state_path = root / 'saved/state.json'
+            saved = json.loads(state_path.read_text())
+            for entries in ([dict(saved['snapshots'][0], id='current')], saved['snapshots'] * 2):
+                state_path.write_text(json.dumps(dict(saved, snapshots=entries)))
+                before = list(pool.snapshots)
+                with self.assertRaises(ValueError):
+                    pool.restore_state(root / 'saved')
+                self.assertEqual(pool.snapshots, before)
+            pool.close()
+
     def test_historical_opponent_is_batched_and_results_update_elo(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

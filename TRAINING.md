@@ -302,6 +302,8 @@ conda run -n clash-royale python train_native.py --rounds 10 --output artifacts/
 策略当成初始基线。新保存的状态记录初始基线和历史对手快照的 SHA-256，恢复前核验；
 历史快照注册后在加载和保存时也核验身份。旧状态若没有这些校验值，只能检查文件存在，
 无法追溯验证其内容是否被替换。
+历史快照 ID 不能使用 `random`、`current` 或路径形式；重复注册必须保持路径、轮次和
+内容哈希一致，仍被对局使用的已淘汰 ID 也不能复用。恢复前拒绝重复或保留的快照 ID。
 新状态采用 `native_training_resume_v2`，同时保存配置、全局 RNG 文件和联赛清单的
 SHA-256；所有必要文件写入成功后才发布 `runtime.json`，恢复前先核验这些文件。
 旧无 schema 状态保留兼容读取，但无法追溯核验这些额外文件的身份。
@@ -311,7 +313,7 @@ SHA-256；所有必要文件写入成功后才发布 `runtime.json`，恢复前�
 每次运行记录 `source_sha256.json`，并在 `summary.json` 中保存启动时的源码哈希；
 训练期间源码发生变化会使运行失效。正式实验汇总同时核验其与计划一致，哈希范围包括
 Python、训练配置、依赖约束和原生 probe 源码。已有旧计划应保留历史记录，使用修复后
-源码重新生成计划；当前计划为 `artifacts/experiments/20261010_static_review_4/plan.json`。
+源码重新生成计划；当前计划为 `artifacts/experiments/20261010_static_review_5/plan.json`。
 运行时也拒绝含训练产物的输出目录，且独占创建源码记录，防止重试或并发调用覆盖旧运行。
 已准备的 `config.json`、`console.log`、`status.json` 可以保留。
 
@@ -324,6 +326,10 @@ Python、训练配置、依赖约束和原生 probe 源码。已有旧计划应�
 保存，评估失败也保留完整的训练检查点。
 `interrupted_model.zip` 仅在已确认完成 PPO 更新的边界才保存续训状态，步数恰好整除
 rollout 不能单独证明更新完成。回调提前停止也不能把未完成更新的模型标记为完整训练。
+该判断同时用于自博弈快照、最终固定评估和训练指标；中断摘要中的 `completed_rounds`
+只计已经完成的 PPO 更新，`timesteps` 仍保留实际采样数。提前停止不执行待运行的延迟评估。
+v4、v5、v6 共用 PPO 更新循环，只有有效样本数大于一时才归一化 advantage；直接 Python
+调用产生的单样本 minibatch 不会因无偏标准差而污染参数。普通 v4 批次与上游更新保持一致。
 
 ## 探索诊断与策略回放
 
