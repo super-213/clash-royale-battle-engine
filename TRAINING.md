@@ -169,6 +169,8 @@ Python、NumPy、Torch CPU/MPS/CUDA 随机数状态，避免冻结对手的加�
 learner decisions 计算，必须是 `rollout_decisions` 的整数倍；评估决策不进入训练预算。
 各组保持相同决策间隔、rollout、PPO 更新数、训练对手采样比例和快照发布节奏，每次
 运行从头初始化自己的自博弈池。不同组的策略和历史池会随训练自然分化。
+正式计划拒绝 `resume_from`，汇总要求本次新增决策数等于完整预算，避免把旧模型的累计
+步数算作本次实验交互。轮次、seed、并行数等整数配置拒绝小数或布尔值，不再静默截断。
 
 默认比较四组，每组至少三个不同训练种子：
 
@@ -243,6 +245,10 @@ reward 或最优 checkpoint；各实验复用相同对手副本、哈希、种�
 正式汇总从逐局记录重新计算，拒绝预算不足、缺局、重复局、超时、配置/赛程改动及
 checkpoint 哈希不匹配。中途已有完整结果的运行可跳过；中断训练保留已有产物，
 重新从头训练需新建 suite，避免混入不等预算。Python/profile 改动后也应新建计划。
+汇总还检查逐局 winner／胜负一致性、checkpoint 轮次、决策与失败计数、关键指标有限值
+及有效训练耗时。保留测试因异常中断时，重跑 suite 会将该评估目录归档为
+`evaluation_failed_NNN` 后重新执行相同赛程，不重训已完成的模型。已完成的评估不会自动
+重跑，即使其超时而无效；损坏或无效的完整结果仍报错。
 尚未完成整个矩阵时，汇总保留完整种子的组，但总状态为无效。
 
 ```bash
@@ -300,7 +306,13 @@ conda run -n clash-royale python train_native.py --rounds 10 --output artifacts/
 每次运行记录 `source_sha256.json`，并在 `summary.json` 中保存启动时的源码哈希；
 训练期间源码发生变化会使运行失效。正式实验汇总同时核验其与计划一致，哈希范围包括
 Python、训练配置、依赖约束和原生 probe 源码。已有旧计划应保留历史记录，使用修复后
-源码重新生成计划；当前计划为 `artifacts/experiments/20261010_static_review_2/plan.json`。
+源码重新生成计划；当前计划为 `artifacts/experiments/20261010_static_review_3/plan.json`。
+运行时也拒绝含训练产物的输出目录，且独占创建源码记录，防止重试或并发调用覆盖旧运行。
+已准备的 `config.json`、`console.log`、`status.json` 可以保留。
+
+离线固定评估使用显式 `evaluation_initial_policy_path`，或从 checkpoint 状态侧车、原运行
+目录查找初始基线，并利用侧车中的哈希核验。找不到原始基线时明确报错，不会用待评估
+模型替代初始策略。只评估 random 或其他冻结对手时不需要初始基线。
 
 中断后的 `interrupted_model.zip` 是尽力保存的权重，可能处于采样或优化中间；恢复时
 优先使用最近一个完整的 `checkpoints/*.zip` 及其状态目录。最终轮在固定评估之前额外

@@ -240,6 +240,25 @@ def prepare_config(profile, defaults_only=False):
 
 
 def validate_config(config):
+    integer_fields = (
+        "rounds", "battles", "batch_size", "checkpoint_every_rounds", "rollout_decisions",
+        "epochs_per_round", "decision_ticks", "seed", "port", "evaluation_port",
+        "self_play_snapshot_every_rounds", "self_play_pool_size", "self_play_active_historical",
+        "self_play_loaded_model_limit", "tbptt_steps", "recurrent_hidden_size", "recurrent_layers",
+        "cross_modal_dim", "cross_modal_heads", "cross_modal_entity_layers", "spatial_feature_channels",
+        "auxiliary_horizon", "world_model_hidden_dim", "evaluation_seed_base", "evaluation_every_rounds",
+        "evaluation_seed_count", "evaluation_battles", "evaluation_max_decisions",
+    )
+    for key in integer_fields:
+        value = config.get(key)
+        if value is None:
+            continue
+        try:
+            valid = not isinstance(value, bool) and (isinstance(value, int) or float(value) == int(value))
+        except (ValueError, TypeError, OverflowError):
+            valid = False
+        if not valid:
+            raise ValueError(f"{key} must be an integer without truncation")
     if int(config["rounds"]) <= 0 or not 1 <= int(config["battles"]) <= 16:
         raise ValueError("rounds must be positive and battles must be between 1 and 16")
     if int(config["batch_size"]) <= 1 or int(config["checkpoint_every_rounds"]) <= 0:

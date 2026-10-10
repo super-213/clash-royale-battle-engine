@@ -101,6 +101,9 @@ class TrainingExperimentsTest(unittest.TestCase):
                     experiments.create_plan(self.config(), Path(directory) / "suite", opponents,
                                             budget, seeds, test_seed_base=test_base, test_seed_count=1)
             self.assertFalse((Path(directory) / "suite").exists())
+            with self.assertRaisesRegex(ValueError, 'from scratch'):
+                experiments.create_plan(dict(self.config(), resume_from='old.zip'), Path(directory) / 'suite',
+                                        opponents, 16, [0, 1, 2])
 
     def test_checkpoint_identity_and_relative_manifest_paths(self):
         with TemporaryDirectory() as directory:
@@ -145,6 +148,21 @@ class TrainingExperimentsTest(unittest.TestCase):
         np.testing.assert_array_equal(np.random.get_state()[1], numpy_state[1])
         torch.testing.assert_close(torch.get_rng_state(), torch_state)
 
+    def test_held_out_retry_preserves_completed_and_unknown_attempts(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            evaluation = root / 'post_training/evaluation'
+            evaluation.mkdir(parents=True)
+            status = evaluation / 'status.json'
+            for valid in (True, False):
+                status.write_text(json.dumps({'status': 'completed', 'valid': valid}))
+                self.assertFalse(experiments._prepare_held_out(root))
+                self.assertTrue(evaluation.exists())
+            status.write_text(json.dumps({'status': 'unknown'}))
+            with self.assertRaisesRegex(ValueError, 'unknown'):
+                experiments._prepare_held_out(root)
+            self.assertTrue(evaluation.exists())
+
     def test_real_cpu_suite_trains_four_variants_and_reloads_on_held_out_schedule(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -155,7 +173,21 @@ class TrainingExperimentsTest(unittest.TestCase):
             self.assertEqual(plan["total_training_decisions"], 192)
             self.assertTrue(Path(plan["frozen_opponents"]["frozen_v4"]["path"]).is_relative_to(suite.resolve()))
             with patch("native_engine.native_vec_env.Batch", side_effect=lambda **kwargs: TerminalBatch(kwargs["battles"])):
-                report = experiments.run_suite(suite)
+                def interrupt_evaluation(config, checkpoint, output):
+                    evaluation = Path(output) / 'evaluation'
+                    evaluation.mkdir(parents=True)
+                    (evaluation / 'status.json').write_text(json.dumps({'status': 'failed'}))
+                    (evaluation / 'matches.jsonl').write_text('partial attempt\n')
+                    raise RuntimeError('held-out transport failure')
+                with patch.object(experiments, 'evaluate_checkpoint', side_effect=interrupt_evaluation):
+                    with self.assertRaisesRegex(RuntimeError, 'held-out transport failure'):
+                        experiments.run_suite(suite)
+                import training_runtime
+                with patch('training_runtime.run_sb3_training', wraps=training_runtime.run_sb3_training) as trainer:
+                    report = experiments.run_suite(suite)
+                    self.assertEqual(trainer.call_count, 11)  # First training run was already complete.
+                failed = Path(plan['runs'][0]['run_dir']) / 'post_training/evaluation_failed_001/matches.jsonl'
+                self.assertEqual(failed.read_text(), 'partial attempt\n')
                 self.assertTrue(report["valid"])
                 self.assertEqual(len(report["groups"]), 4 * 7)  # aggregate + two opponents × (combined/p0/p1)
                 self.assertEqual(len(report["paired_differences"]), 3 * 7)
@@ -191,11 +223,33 @@ class TrainingExperimentsTest(unittest.TestCase):
             matches.write_text(original)
             schedule_path = run_dir / "post_training" / "evaluation" / "schedule.json"
             schedule = json.loads(schedule_path.read_text())
+            original_schedule = copy.deepcopy(schedule)
             schedule["seeds"] = [1]
             schedule_path.write_text(json.dumps(schedule))
             self.assertFalse(experiments.build_report(suite)["valid"])
+            schedule_path.write_text(json.dumps(original_schedule))
+            for key, value in (('crown_diff', float('nan')), ('tower_hp_diff', None),
+                               ('episode_reward', float('inf')), ('decisions', 0),
+                               ('invalid_actions', 999), ('winner', 2), ('result', 'loss'), ('round', 999)):
+                corrupted = [json.loads(line) for line in original.splitlines()]
+                corrupted[0][key] = value
+                matches.write_text(''.join(json.dumps(row) + '\n' for row in corrupted))
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    experiments.read_run_result(plan, plan['runs'][0])
+            matches.write_text(original)
             metadata_path = run_dir / "summary.json"
             metadata = json.loads(metadata_path.read_text())
+            for key, value in (('parameters', float('nan')), ('session_timesteps', 8)):
+                changed = dict(metadata, **{key: value})
+                metadata_path.write_text(json.dumps(changed))
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    experiments.read_run_result(plan, plan['runs'][0])
+            original_duration = metadata['training_elapsed_seconds']
+            metadata['training_elapsed_seconds'] = float('nan')
+            metadata_path.write_text(json.dumps(metadata))
+            with self.assertRaisesRegex(ValueError, 'training duration'):
+                experiments.read_run_result(plan, plan['runs'][0])
+            metadata['training_elapsed_seconds'] = original_duration
             original_sources = metadata["source_sha256"]
             metadata["source_sha256"] = {}
             metadata_path.write_text(json.dumps(metadata))

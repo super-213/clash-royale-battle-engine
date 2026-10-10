@@ -6,6 +6,7 @@ import argparse
 import copy
 import csv
 import json
+import math
 import shutil
 from pathlib import Path
 
@@ -83,6 +84,8 @@ def create_plan(base, suite_dir, opponents, total_decisions, seeds, variants=COR
     suite_dir = Path(suite_dir).resolve()
     if suite_dir.exists():
         raise ValueError("suite directory already exists; use run/report for an existing plan")
+    if base.get("resume_from"):
+        raise ValueError("equal-budget experiments must train from scratch, without resume_from")
     seeds, variants = list(seeds), list(variants)
     if len(seeds) < 3 or len(set(seeds)) != len(seeds) or any(seed < 0 for seed in seeds):
         raise ValueError("use at least three distinct nonnegative training seeds")
@@ -185,6 +188,10 @@ def read_run_result(plan, run):
         raise ValueError(f"training source does not match the experiment plan: {root}")
     if metadata["status"] != "completed" or metadata["timesteps"] != plan["total_decisions_per_run"]:
         raise ValueError(f"incomplete or unequal training budget: {root}")
+    if metadata.get("session_timesteps", metadata["timesteps"]) != plan["total_decisions_per_run"]:
+        raise ValueError("experiment must collect the complete budget in one fresh training run")
+    if type(metadata["parameters"]) is not int or metadata["parameters"] <= 0:
+        raise ValueError("invalid parameter count")
     checkpoint_spec(root / "final_model.zip", config["algorithm"], metadata["model_sha256"])
     evaluation = root / "post_training" / "evaluation"
     checkpoint = json.loads((evaluation / "checkpoint.json").read_text())
@@ -201,6 +208,25 @@ def read_run_result(plan, run):
         or match["timesteps"] != plan["total_decisions_per_run"] for match in matches
     ):
         raise ValueError(f"held-out schedule incomplete, timed out or duplicated: {root}")
+    for match in matches:
+        decisions, invalid = match["decisions"], match["invalid_actions"]
+        if (type(decisions) is not int or not 1 <= decisions <= config["evaluation_max_decisions"]
+                or type(invalid) is not int or not 0 <= invalid <= decisions
+                or match["round"] != config["rounds"]):
+            raise ValueError("invalid held-out decision counts or checkpoint round")
+        winner = match["winner"]
+        if winner is not None and (type(winner) is not int or winner not in (0, 1)):
+            raise ValueError("invalid held-out winner")
+        expected_result = "draw" if winner is None else "win" if winner == match["learner_role"] else "loss"
+        if match["result"] != expected_result:
+            raise ValueError("held-out result contradicts its winner and learner role")
+        for name in ("crown_diff", "tower_hp_diff", "episode_reward"):
+            value = match[name]
+            if type(value) not in (int, float) or not math.isfinite(value):
+                raise ValueError(f"invalid held-out metric: {name}")
+    duration = metadata.get("training_elapsed_seconds", metadata["elapsed_seconds"])
+    if type(duration) not in (int, float) or not math.isfinite(duration) or duration <= 0:
+        raise ValueError("invalid training duration")
     from fixed_evaluation import _summarize
 
     rows = []
@@ -214,7 +240,7 @@ def read_run_result(plan, run):
         row = _summarize(selected, config["rounds"], metadata["timesteps"], name, 0)
         row.update(variant=run["variant"], training_seed=run["seed"],
                    parameters=metadata["parameters"], elapsed_seconds=metadata["elapsed_seconds"],
-                   decisions_per_second=metadata.get("session_timesteps", metadata["timesteps"]) / max(1e-9, metadata.get("training_elapsed_seconds", metadata["elapsed_seconds"])))
+                   decisions_per_second=metadata.get("session_timesteps", metadata["timesteps"]) / duration)
         rows.append(row)
     return rows
 
@@ -291,6 +317,24 @@ def build_report(suite_dir):
     return report
 
 
+def _prepare_held_out(root):
+    """Archive interrupted evaluation attempts; never discard a completed result."""
+    evaluation = root / "post_training" / "evaluation"
+    if not evaluation.exists():
+        return True
+    status_path = evaluation / "status.json"
+    status = json.loads(status_path.read_text()) if status_path.is_file() else {}
+    if status.get("status") == "completed":
+        return False
+    if status.get("status") not in (None, "running", "failed"):
+        raise ValueError("unknown held-out evaluation status")
+    index = 1
+    while (evaluation.parent / f"evaluation_failed_{index:03d}").exists():
+        index += 1
+    evaluation.rename(evaluation.parent / f"evaluation_failed_{index:03d}")
+    return True
+
+
 def run_suite(suite_dir):
     suite_dir = Path(suite_dir).resolve()
     plan = json.loads((suite_dir / "plan.json").read_text())
@@ -315,6 +359,8 @@ def run_suite(suite_dir):
                 metadata = json.loads((root / "summary.json").read_text())
                 if metadata["status"] != "completed" or metadata["timesteps"] != plan["total_decisions_per_run"]:
                     raise ValueError(f"interrupted run {root}; create a fresh suite rather than mixing restart budgets")
+                if metadata.get("source_sha256") != plan["source_sha256"]:
+                    raise ValueError("completed training source differs from the plan")
                 checkpoint_spec(root / "final_model.zip", config["algorithm"], metadata["model_sha256"])
             else:
                 from one_click_train import TeeStream
@@ -331,7 +377,7 @@ def run_suite(suite_dir):
                     errors.close()
                 if metadata["timesteps"] != plan["total_decisions_per_run"]:
                     raise ValueError("trainer exceeded the exact interaction budget")
-            if not (root / "post_training" / "evaluation").exists():
+            if _prepare_held_out(root):
                 held_out_config = test_config(plan, config)
                 (root / "post_training").mkdir(exist_ok=True)
                 _atomic_json(root / "post_training" / "config.json", held_out_config)

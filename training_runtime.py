@@ -821,8 +821,13 @@ def _run_sb3_training(config, run_dir, resources):
     config = dict(config)
     run_dir = Path(run_dir).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
+    if any(path.name not in {"config.json", "console.log", "status.json"} for path in run_dir.iterdir()):
+        raise ValueError("training output already contains run artifacts; use a fresh run directory")
     source_at_start = source_hashes()
-    _atomic_json(run_dir / "source_sha256.json", source_at_start)
+    # Exclusive creation also prevents two trainers from claiming the same run.
+    with (run_dir / "source_sha256.json").open("x", encoding="utf-8") as stream:
+        json.dump(source_at_start, stream, indent=2, sort_keys=True)
+        stream.write("\n")
     device = require_training_device(config["device"])
     battles = int(config["battles"])
     rollout_decisions = int(config["rollout_decisions"])

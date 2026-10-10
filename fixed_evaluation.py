@@ -49,6 +49,36 @@ def checkpoint_spec(path, algorithm, expected_sha256=None):
     return {"path": str(path), "algorithm": str(algorithm), "sha256": digest}
 
 
+def initial_policy_path(config, checkpoint):
+    """Resolve the original baseline, never substitute the evaluated learner."""
+    from training_runtime import resume_directory
+
+    if "initial_policy" not in config["evaluation_opponents"]:
+        return Path(checkpoint)
+    explicit = config.get("evaluation_initial_policy_path")
+    if explicit is not None:
+        path = Path(explicit)
+        if not path.is_file():
+            raise ValueError("explicit initial-policy baseline is missing")
+        return path
+    sidecar = resume_directory(checkpoint)
+    runtime = sidecar / "runtime.json"
+    expected = json.loads(runtime.read_text()).get("initial_policy_sha256") if runtime.is_file() else None
+    baseline = sidecar / "initial_policy.zip"
+    if baseline.is_file():
+        checkpoint_spec(baseline, config["algorithm"], expected)
+        return baseline
+    checkpoint = Path(checkpoint).resolve()
+    candidates = [config.get("_initial_policy_path"),
+                  checkpoint.parent / "evaluation/baselines/initial_policy.zip",
+                  checkpoint.parent.parent / "evaluation/baselines/initial_policy.zip"]
+    for candidate in candidates:
+        if candidate is not None and Path(candidate).is_file():
+            checkpoint_spec(candidate, config["algorithm"], expected)
+            return Path(candidate)
+    raise ValueError("original initial-policy baseline not found; provide evaluation_initial_policy_path")
+
+
 @contextmanager
 def preserve_random_state():
     """Loading opponents must not change PPO's sampling/minibatch RNG stream."""
@@ -307,11 +337,15 @@ class FixedEvaluationCallback(BaseCallback):
         self.algorithm_class = algorithm_class
         self.env_kwargs = dict(env_kwargs)
         self.rollout_decisions = int(rollout_decisions)
-        self.every_rounds = max(1, int(every_rounds))
+        self.every_rounds = int(every_rounds)
         self.seed_base = int(seed_base)
         self.seed_count = int(seed_count)
         self.battles = int(battles)
         self.max_decisions = int(max_decisions)
+        if min(self.rollout_decisions, self.every_rounds, self.seed_count, self.max_decisions) <= 0 or self.seed_base < 0:
+            raise ValueError("evaluation counts must be positive and seed_base nonnegative")
+        if not 1 <= self.battles <= 16:
+            raise ValueError("evaluation battles must be between 1 and 16")
         self.opponents = tuple(str(value) for value in opponents)
         self.initial_policy_path = Path(initial_policy_path).resolve()
         self.device = str(device)
@@ -681,6 +715,7 @@ def evaluate_checkpoint(config, checkpoint, output_dir):
     output_dir = Path(output_dir).resolve()
     if (output_dir / "evaluation").exists():
         raise ValueError("use a fresh output directory for checkpoint evaluation")
+    baseline = initial_policy_path(config, checkpoint)
     algorithm = load_object(config["algorithm"])
     with preserve_random_state():
         model = load_inference_model(algorithm, checkpoint, config["device"])
@@ -698,7 +733,7 @@ def evaluate_checkpoint(config, checkpoint, output_dir):
             battles=int(config["evaluation_battles"]),
             max_decisions=int(config["evaluation_max_decisions"]),
             opponents=config["evaluation_opponents"],
-            initial_policy_path=config.get("evaluation_initial_policy_path", checkpoint),
+            initial_policy_path=baseline,
             device=config["device"],
             frozen_opponents=config.get("evaluation_frozen_opponents"),
             restore_training=False,
@@ -724,9 +759,6 @@ def main(argv=None):
     config = json.loads(args.config.read_text())
     if args.device:
         config["device"] = args.device
-    config.setdefault("evaluation_initial_policy_path", str(
-        args.config.resolve().parent / "evaluation" / "baselines" / "initial_policy.zip"
-    ))
     result = evaluate_checkpoint(config, args.checkpoint, args.output_dir)
     return 0 if result["latest"]["valid"] else 2
 

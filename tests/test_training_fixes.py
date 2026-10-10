@@ -25,6 +25,7 @@ from one_click_train import validate_config
 from self_play import SelfPlayOpponentPool
 from auxiliary_validation import collect_dataset, score_dataset
 from native_visualizer import record_replay, write_replay
+from fixed_evaluation import evaluate_checkpoint, initial_policy_path, FixedEvaluationCallback
 
 
 class TrainingFixesTest(unittest.TestCase):
@@ -132,6 +133,8 @@ class TrainingFixesTest(unittest.TestCase):
 
     def test_configuration_rejects_invalid_values_before_training(self):
         for key, value in (
+            ('rounds', 2.9), ('battles', 2.5), ('seed', True), ('port', 26789.5),
+            ('evaluation_battles', float('inf')),
             ('rollout_decisions', 0), ('epochs_per_round', 0), ('decision_ticks', 0),
             ('decision_ticks', 1_000_001), ('port', 0), ('seed', -1),
             ('learning_rate', float('nan')), ('gamma', 1.1), ('gae_lambda', -1),
@@ -151,6 +154,66 @@ class TrainingFixesTest(unittest.TestCase):
                       self_play_current_ratio=.4, self_play_historical_ratio=.7)
         with self.assertRaises(ValueError):
             validate_config(config)
+
+    def test_training_rejects_existing_artifacts_before_mutating_them(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ('metrics.jsonl', 'source_sha256.json', 'final_model.zip'):
+                output = root / name.replace('.', '_')
+                output.mkdir()
+                artifact = output / name
+                artifact.write_bytes(b'previous run')
+                with self.subTest(artifact=name), patch('training_runtime.load_object') as load:
+                    with self.assertRaisesRegex(ValueError, 'fresh run directory'):
+                        run_sb3_training(self.config(), output)
+                    self.assertEqual(artifact.read_bytes(), b'previous run')
+                    self.assertEqual(list(output.iterdir()), [artifact])
+                    load.assert_not_called()
+            fresh = root / 'prepared'
+            fresh.mkdir()
+            (fresh / 'config.json').write_text(json.dumps(self.config()))
+            self.train(fresh)
+
+    def test_offline_evaluation_uses_original_baseline_and_rejects_missing_one(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self.config()
+            config['fixed_evaluation_enabled'] = True
+            self.train(root / 'train', config)
+            checkpoint = root / 'train/final_model.zip'
+            sidecar = resume_directory(checkpoint)
+            expected = json.loads((sidecar / 'runtime.json').read_text())['initial_policy_sha256']
+            with patch('native_engine.native_vec_env.Batch', side_effect=lambda **kw: TerminalBatch(kw['battles'])):
+                evaluate_checkpoint(config, checkpoint, root / 'offline')
+            schedule = json.loads((root / 'offline/evaluation/schedule.json').read_text())
+            self.assertEqual(schedule['initial_policy']['sha256'], expected)
+            self.assertNotEqual(expected, json.loads((sidecar / 'runtime.json').read_text())['model_sha256'])
+            (sidecar / 'initial_policy.zip').unlink()
+            original_baseline = root / 'train/evaluation/baselines/initial_policy.zip'
+            original = original_baseline.read_bytes()
+            original_baseline.write_bytes(b'changed')
+            with self.assertRaisesRegex(ValueError, 'hash changed'):
+                initial_policy_path(config, checkpoint)
+            original_baseline.unlink()
+            with self.assertRaisesRegex(ValueError, 'original initial-policy baseline'):
+                evaluate_checkpoint(config, checkpoint, root / 'missing')
+            self.assertFalse((root / 'missing').exists())
+            explicit = root / 'explicit.zip'
+            explicit.write_bytes(original)
+            config['evaluation_initial_policy_path'] = str(explicit)
+            self.assertEqual(initial_policy_path(config, checkpoint), explicit)
+
+    def test_direct_evaluation_rejects_invalid_schedule_counts(self):
+        with TemporaryDirectory() as directory:
+            kwargs = dict(run_dir=directory, env_class=NativeBatchVecEnv,
+                          algorithm_class=NativeActionConditionedWorldModelPPO,
+                          env_kwargs={}, rollout_decisions=8, every_rounds=1, seed_base=900001,
+                          seed_count=1, battles=1, max_decisions=4, opponents=['random'],
+                          initial_policy_path=Path(directory) / 'unused.zip', device='cpu')
+            for key, value in (('rollout_decisions', 0), ('every_rounds', 0), ('seed_base', -1),
+                               ('seed_count', 0), ('battles', 0), ('battles', 17), ('max_decisions', 0)):
+                with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                    FixedEvaluationCallback(**dict(kwargs, **{key: value}))
 
     def test_model_construction_failure_closes_environment(self):
         env = NativeBatchVecEnv(battles=2, batch_factory=lambda **kw: FakeBatch(2))
