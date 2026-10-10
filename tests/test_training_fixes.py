@@ -114,6 +114,83 @@ class TrainingFixesTest(unittest.TestCase):
         finally:
             env.close()
 
+    def test_incremental_public_elixir_matches_history_at_all_query_times(self):
+        from native_engine.native_vec_env import FIRST_PLAYABLE_TICK, TICK_SECONDS, _regenerated_elixir
+        env = NativeBatchVecEnv(battles=1, batch_factory=lambda **kw: FakeBatch(1))
+        events = []
+        def reference(owner, tick):
+            value, previous = 5., 0.
+            for event in events:
+                if event.owner == owner and event.tick <= tick:
+                    seconds = max(0., (event.tick - FIRST_PLAYABLE_TICK) * TICK_SECONDS)
+                    value = max(0., min(10., value + _regenerated_elixir(previous, seconds)) - event.cost)
+                    previous = seconds
+            return min(10., value + _regenerated_elixir(previous, max(0., (tick - FIRST_PLAYABLE_TICK) * TICK_SECONDS)))
+        try:
+            env.reset()
+            slot = env.slots[0]
+            ticks = (91, 91, 120, 400, 2490, 2491, 4890, 4891, 6090)
+            for index, tick in enumerate(ticks):
+                for owner in (0, 1):
+                    event = SimpleNamespace(tick=tick, owner=owner, card=CARD_IDS[index % 8], cost=(index % 5) + 1)
+                    events.append(event)
+                    env._record_plays(slot, SimpleNamespace(plays=(event,)), (), ())
+                for query in (90, 91, tick - 1, tick, tick + 10, tick + 1000):
+                    for owner in (0, 1):
+                        self.assertAlmostEqual(env._public_elixir(slot, owner, query), reference(owner, query), places=12)
+            slot.state = replace(slot.state, tick=ticks[-1] + 20)
+            before = [env._observation(slot, owner=owner) for owner in (0, 1)]
+            class UnreadableLedger(list):
+                def __iter__(self):
+                    raise AssertionError('observation replayed the complete ledger')
+                def __reversed__(self):
+                    raise AssertionError('observation replayed the complete ledger')
+            slot.ledger = UnreadableLedger(slot.ledger)
+            for owner in (0, 1):
+                for key, value in env._observation(slot, owner=owner).items():
+                    np.testing.assert_array_equal(value, before[owner][key])
+            with self.assertRaisesRegex(ValueError, 'nondecreasing'):
+                env._record_plays(slot, SimpleNamespace(plays=(events[0],)), (), ())
+            env.reset()
+            for owner in (0, 1):
+                self.assertEqual(env._public_elixir(slot, owner, 90), 5.)
+        finally:
+            env.close()
+
+    def test_actions_reject_lossy_conversion_before_native_submission(self):
+        env = NativeBatchVecEnv(battles=2, batch_factory=lambda **kw: FakeBatch(2))
+        bad = [np.full((2, 3), value) for value in (.5, np.nan, np.inf, True, '1', 2.**63, -2.**64)]
+        bad.append(np.full((2, 3), 2**64 - 1, dtype=np.uint64))
+        try:
+            env.reset()
+            for actions in bad:
+                with self.subTest(dtype=actions.dtype, value=actions[0, 0]), self.assertRaises(ValueError):
+                    env.step_async(actions)
+                self.assertFalse(env.waiting)
+            self.assertFalse(env.batch.step_calls)
+            env.step(np.zeros((2, 3), dtype=float))
+            for policy in (lambda *args: (1.9, 7, 1), SimpleNamespace(predict=lambda *args, **kw: (np.full((2, 3), .5), None))):
+                env.opponent_policy = policy
+                count = len(env.batch.step_calls)
+                with self.assertRaises(ValueError):
+                    env.step(np.zeros((2, 3), dtype=np.int64))
+                self.assertEqual(len(env.batch.step_calls), count)
+            from stable_baselines3.common.base_class import BaseAlgorithm
+            direct = MagicMock(spec=BaseAlgorithm)
+            direct.predict.return_value = (np.full((2, 3), .5), ('new memory',))
+            env.opponent_policy = direct
+            prior_state = env._opponent_state
+            prior_starts = env._opponent_episode_starts.copy()
+            with self.assertRaises(ValueError):
+                env.step(np.zeros((2, 3), dtype=np.int64))
+            self.assertIs(env._opponent_state, prior_state)
+            np.testing.assert_array_equal(env._opponent_episode_starts, prior_starts)
+            env.opponent_policy = None
+            _, _, _, infos = env.step(np.full((2, 3), -1, dtype=np.int64))
+            self.assertTrue(all(info['reward_components']['invalid'] < 0 for info in infos))
+        finally:
+            env.close()
+
     def test_environment_rejects_truncated_receipts_and_partial_reset_results(self):
         fake = FakeBatch(2)
         env = NativeBatchVecEnv(battles=2, batch_factory=lambda **kw: fake)

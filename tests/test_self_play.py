@@ -2,10 +2,12 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
 from self_play import SelfPlayOpponentPool
+from fixed_evaluation import FixedPolicyOpponent
 
 
 class FakePolicy:
@@ -114,6 +116,34 @@ class SelfPlayOpponentPoolTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     pool.restore_state(root / 'saved')
                 self.assertEqual(pool.snapshots, before)
+            pool.close()
+
+    def test_bad_predictions_do_not_advance_opponent_memory_or_truncate_actions(self):
+        with TemporaryDirectory() as directory:
+            model = FakePolicy()
+            pool = SelfPlayOpponentPool(directory, FakeAlgorithm, 'cpu', 2,
+                                       current_ratio=1, historical_ratio=0)
+            pool.set_current_model(model)
+            fixed = FixedPolicyOpponent(model, 2)
+            for wrapper in (pool, fixed):
+                for slot in (0, 1):
+                    wrapper.on_episode_start(slot, 0, 0, 0)
+                for actions in (np.full((2, 3), .5), np.zeros((1, 3)), np.full((2, 3), np.nan)):
+                    model.action = actions
+                    original = model.predict
+                    def invalid(observations, **kwargs):
+                        _, state = original(observations, **kwargs)
+                        return model.action, state
+                    with patch.object(model, 'predict', side_effect=invalid):
+                        with self.assertRaises(ValueError):
+                            wrapper.predict(observations(2))
+                    states = wrapper.assignments if wrapper is pool else wrapper.states
+                    self.assertTrue(all(slot['episode_start'] for slot in states.values()))
+                    self.assertTrue(all(slot.get('recurrent_state', slot.get('state')) is None for slot in states.values()))
+                model.action = np.asarray((1, 7, 1))
+                actions, _ = wrapper.predict(observations(2))
+                np.testing.assert_array_equal(actions, [[1, 7, 1], [1, 7, 1]])
+                self.assertTrue(all(not slot['episode_start'] for slot in states.values()))
             pool.close()
 
     def test_historical_opponent_is_batched_and_results_update_elo(self):

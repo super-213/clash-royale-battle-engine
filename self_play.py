@@ -14,6 +14,7 @@ import numpy as np
 import torch
 from stable_baselines3.common.callbacks import BaseCallback
 from training_runtime import load_inference_model, _sha256, completed_update_at_training_end
+from policy_contracts import validated_actions
 
 
 def _timestamp():
@@ -328,12 +329,7 @@ class SelfPlayOpponentPool:
                     episode_start=episode_starts,
                     deterministic=bool(deterministic),
                 )
-            predicted = np.asarray(predicted)
-            if predicted.shape != (len(indices), 3):
-                raise ValueError(
-                    f"opponent {opponent_id} returned {predicted.shape}, "
-                    f"expected {(len(indices), 3)}"
-                )
+            predicted = validated_actions(predicted, len(indices), f"opponent {opponent_id}")
             actions[indices] = predicted
             for offset, index in enumerate(indices):
                 self.assignments[index]["episode_start"] = False

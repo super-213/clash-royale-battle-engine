@@ -20,6 +20,7 @@ from the opponent's native player record.
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass, field
 from functools import lru_cache
 from itertools import permutations
@@ -29,6 +30,7 @@ from gymnasium import spaces
 import numpy as np
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.vec_env import VecEnv
+from policy_contracts import validated_actions
 
 from .batch import Batch
 from .engine import Play
@@ -166,6 +168,8 @@ class _Slot:
     initial_towers: tuple[Any, ...] = ()
     history: list[_HistoryEvent] = field(default_factory=list)
     ledger: list[_HistoryEvent] = field(default_factory=list)
+    elixir_ticks: list[list[int]] = field(default_factory=lambda: [[], []])
+    elixir_values: list[list[float]] = field(default_factory=lambda: [[], []])
     cycle_states: list[dict] = field(default_factory=list)
     cycle_beliefs: list[tuple] = field(default_factory=list)
 
@@ -471,6 +475,8 @@ class NativeBatchVecEnv(VecEnv):
         self._opponent_episode_starts[slot.index] = True
         slot.history.clear()
         slot.ledger.clear()
+        slot.elixir_ticks = [[], []]
+        slot.elixir_values = [[], []]
         slot.cycle_states = [dict.fromkeys(_INITIAL_CYCLE_STATES, 1) for _ in range(2)]
         slot.cycle_beliefs = [_cycle_belief(()) for _ in range(2)]
         slot.initial_tower_hp = tuple(
@@ -508,11 +514,7 @@ class NativeBatchVecEnv(VecEnv):
             raise RuntimeError("reset the VecEnv before stepping it")
         if self.waiting:
             raise RuntimeError("step_async called while another step is pending")
-        values = np.asarray(actions, dtype=np.int64)
-        if values.shape != (self.battles, 3):
-            raise ValueError(
-                f"expected actions with shape {(self.battles, 3)}, got {values.shape}"
-            )
+        values = validated_actions(actions, self.battles, "learner")
         self._pending_actions = values.copy()
         self.waiting = True
 
@@ -678,25 +680,21 @@ class NativeBatchVecEnv(VecEnv):
             if isinstance(policy, BaseAlgorithm):
                 # A directly supplied recurrent SB3 model needs the same
                 # per-slot memory/reset contract as our league wrappers.
-                actions, self._opponent_state = policy.predict(
+                actions, next_state = policy.predict(
                     batched, state=self._opponent_state,
                     episode_start=self._opponent_episode_starts,
                     deterministic=False,
                 )
+                actions = validated_actions(actions, self.battles, "opponent policy")
+                self._opponent_state = next_state
                 self._opponent_episode_starts[:] = False
-                actions = np.asarray(actions)
             else:
                 actions = np.asarray(policy.predict(batched, deterministic=False)[0])
-            if actions.shape != (self.battles, 3):
-                raise ValueError(
-                    "opponent policy must return actions with shape "
-                    f"{(self.battles, 3)}, got {actions.shape}"
-                )
-            return actions
-        return np.stack([
+            return validated_actions(actions, self.battles, "opponent policy")
+        return validated_actions(np.stack([
             self._opponent_action(slot, observation, observation["action_mask"])
             for slot, observation in zip(self.slots, observations)
-        ])
+        ]), self.battles, "opponent policy")
 
     def _opponent_action(self, slot, observation, action_mask):
         policy = self.opponent_policy
@@ -733,9 +731,15 @@ class NativeBatchVecEnv(VecEnv):
                 x=int(x),
                 y=int(y),
             )
+            owner = recorded.owner
+            ticks = slot.elixir_ticks[owner]
+            if ticks and recorded.tick < ticks[-1]:
+                raise ValueError("public play ticks must be nondecreasing per owner")
             slot.history.append(recorded)
             slot.ledger.append(recorded)
-            owner = recorded.owner
+            value = max(0.0, self._public_elixir(slot, owner, recorded.tick) - recorded.cost)
+            slot.elixir_ticks[owner].append(recorded.tick)
+            slot.elixir_values[owner].append(value)
             slot.cycle_states[owner] = _advance_cycle_states(slot.cycle_states[owner], recorded.card)
             slot.cycle_beliefs[owner] = _cycle_summary(slot.cycle_states[owner])
         del slot.history[:-HISTORY_LENGTH]
@@ -790,21 +794,15 @@ class NativeBatchVecEnv(VecEnv):
         return mask
 
     def _public_elixir(self, slot, owner, tick):
-        estimate = 5.0
-        last_seconds = 0.0
+        # Values are committed only at public plays. Binary search preserves
+        # historical before-state queries used by temporal features, without
+        # replaying the full match ledger on every observation.
+        ticks = slot.elixir_ticks[owner]
+        index = bisect_right(ticks, tick) - 1
+        estimate = slot.elixir_values[owner][index] if index >= 0 else 5.0
+        last_seconds = (max(0.0, (ticks[index] - FIRST_PLAYABLE_TICK) * TICK_SECONDS)
+                        if index >= 0 else 0.0)
         now_seconds = max(0.0, (int(tick) - FIRST_PLAYABLE_TICK) * TICK_SECONDS)
-        for event in slot.ledger:
-            if event.owner != owner or event.tick > tick:
-                continue
-            event_seconds = max(
-                0.0, (event.tick - FIRST_PLAYABLE_TICK) * TICK_SECONDS
-            )
-            estimate = min(
-                10.0,
-                estimate + _regenerated_elixir(last_seconds, event_seconds),
-            )
-            estimate = max(0.0, estimate - event.cost)
-            last_seconds = event_seconds
         return min(10.0, estimate + _regenerated_elixir(last_seconds, now_seconds))
 
     @staticmethod
@@ -988,25 +986,20 @@ class NativeBatchVecEnv(VecEnv):
             min(len(slot.history) / HISTORY_LENGTH, 1.0),
         ), dtype=np.float32)
 
-        opponent_plays = tuple(
-            event.card for event in slot.ledger if event.owner == enemy
-        )
         # Update once per public event; do not replay the entire match's card
         # sequence on every learner/opponent observation.
         hand_belief, next_belief, confidence = slot.cycle_beliefs[enemy]
         last_play_ages = []
         for physical_owner in (owner, enemy):
-            last_tick = next((
-                event.tick for event in reversed(slot.ledger)
-                if event.owner == physical_owner
-            ), FIRST_PLAYABLE_TICK)
+            ticks = slot.elixir_ticks[physical_owner]
+            last_tick = ticks[-1] if ticks else FIRST_PLAYABLE_TICK
             last_play_ages.append(np.clip(
                 (state.tick - last_tick) * TICK_SECONDS / 60.0, 0, 1
             ))
         public_belief = np.asarray((
             *hand_belief,
             *next_belief,
-            min(len(opponent_plays) / 4.0, 1.0),
+            min(len(slot.elixir_ticks[enemy]) / 4.0, 1.0),
             confidence,
             *last_play_ages,
         ), dtype=np.float32)

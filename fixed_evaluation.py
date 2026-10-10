@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from stable_baselines3.common.callbacks import BaseCallback
+from policy_contracts import validated_actions
 
 
 EVALUATION_COLUMNS = (
@@ -152,10 +153,11 @@ class FixedPolicyOpponent:
             episode_start=episode_start,
             deterministic=True,
         )
+        actions = validated_actions(actions, count, "fixed opponent")
         for index, slot in enumerate(slots):
             slot["episode_start"] = False
             slot["state"] = self._slice_state(next_state, index)
-        return np.asarray(actions), None
+        return actions, None
 
     @staticmethod
     def _stack_states(states):
