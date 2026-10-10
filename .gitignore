@@ -16,6 +16,7 @@ local.properties
 __pycache__/
 *.py[cod]
 /artifacts/training_runs/
+/artifacts/experiments/
 /artifacts/emulator/
 
 # Large binary files
