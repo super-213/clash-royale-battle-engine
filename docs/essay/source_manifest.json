@@ -1,7 +1,7 @@
 {
   "prepared_date": "2026-10-10",
   "timezone": "Asia/Shanghai",
-  "git_head": "d65203c64dfc867249f9ab7e9a7a997927f27206",
+  "git_head": "c5c5d89195e63c88ac2018d9a7403a2c071ddbaa",
   "paper_scope": "Methods and experiment design only; no empirical battle results",
   "architecture": "action_conditioned_world_model_stateful_v6",
   "verification_environment": {
@@ -38,24 +38,25 @@
       "random",
       "legacy_v5"
     ],
-    "path": "artifacts/experiments/20261010_static_review_3/plan.json",
-    "status": "planned after third static review; formal native runs not executed"
+    "path": "artifacts/experiments/20261010_static_review_4/plan.json",
+    "status": "planned after fourth static review; formal native runs not executed"
   },
   "source_sha256": {
-    "TRAINING.md": "85bb0a6c7a0cedec7711c67152a386d282b232f4ca16e15df858e7b2a18c8ce6",
+    "TRAINING.md": "fa4d831cbf072192848646d4a957b863caf7dc6694accc07daceb8bac1b1b2f9",
     "artifacts/experiments/20261010_static_review/plan.json": "36f8475bb3e104953a3583f34ec7623c595c6a772fb3fbea250fa7ce9796b5e0",
     "artifacts/experiments/20261010_static_review_2/plan.json": "c47a8dceb0ecc30985a6d05ba6570cb227a55cfa25ced01c66f0ef8d5766de56",
     "artifacts/experiments/20261010_static_review_3/plan.json": "c73d24727474e7d43d1a079dc5dcec57392f48d74f3ad1b7e97215590a0f9787",
-    "auxiliary_validation.py": "eae792a312759c1bac652cac2efff3f0915234903f88e8448545a54c11044b81",
+    "artifacts/experiments/20261010_static_review_4/plan.json": "2719db3e4ecf618915d4684a5a6177794f1c2d5b6ec5e498b3e1774bfb32049b",
+    "auxiliary_validation.py": "2102fc6ffa18b6cb066fb90fcb86a00458803ac54cc749355596ca50e55ea7af",
     "batch.py": "08e874a0e4cf93a42759ba599b4fd2c2cf2878e70aba43d6deb17ed861b1a1d8",
-    "docs/essay/paper.md": "2b18e4307d65ef28bc270aaed2ea8dc9da7756c44f1ad23e354883b5d3802e77",
+    "docs/essay/paper.md": "30d75d2a9827604287ff09496c1a78346f3982df52ec065b878e76eb2cbd350a",
     "engine.py": "79b05f200b2a4dfc9c807a7562aa99c7b86de4727ed51dfb90cd1d95030245fb",
     "fixed_evaluation.py": "d4960013a2c95c808070a1ad208d11604e471485fa437fdccd9869aeade9b3ec",
     "native_cross_modal.py": "2f21ce3da7f80a6bcca4bd3ede5f75dadcedc8d9fd6945009dd2d57f8b61db1d",
     "native_model.py": "d9ab62a8fcca9133266a54b351dc333406a0d693a60810d8939046c37aa26ffe",
-    "native_recurrent_model.py": "e27f495924721e264e56c1bee34f99c8a00cf7e3a85462feb1e5cbd81da15aa7",
+    "native_recurrent_model.py": "e5df863963ad3d418f08061ef08e5457d04160195c8e3f9a3b7ba425b9a09ee9",
     "native_spatial_model.py": "a3320bb6b2e7b6cb91856c2fd3db56f9470f18924f7bd2925d772f89dfb9ae48",
-    "native_vec_env.py": "54d8c209fe30111d84a19d19440f2d15e312c5c235c4870c5068d722b9f86886",
+    "native_vec_env.py": "1f4c86135d4ee26b701767f1a375373fcfc3607f35d9227578faa96ed6db5f08",
     "native_visualizer.py": "e10bb8740d971afa219ae27a41683e4019a9c71ff9ddfe8b071777a1299097c2",
     "native_world_model.py": "fb84cc8d4c77ca13841ba1b41af7d5082526bba8d8987c7710f8c47cccfd01e7",
     "one_click_train.py": "da430efbb0f651bb5030a93318ad4deea7b944259d203a6917f0e282ec2fd5bc",
@@ -67,11 +68,11 @@
     "tests/test_client_failures.py": "3e9d86422ea167d16ad7fd5669356a072619e9a2bea4aa0c58e26c3a2b032ddb",
     "tests/test_self_play.py": "ed03138693002bb62b9154a488aff24a7025ef0c0a9aa41fc4c972ed9e491a37",
     "tests/test_training_experiments.py": "05f09e3e5b3fcfd1322b94dbbdf2f1951d6ba8b6ebc501b411f52dc31d48c9ef",
-    "tests/test_training_fixes.py": "0de4e02167c5ee3858550da80f6482078aed3595fc85b4cdb1ce83f8a8608076",
+    "tests/test_training_fixes.py": "9ea5902e2157ebd449e7c047e3e5c5fe9b6bbdb0db9c971bf940b74bfa5ea1e2",
     "train_native.py": "0e59374a3ff7e4fab2f0a3f69c85327998c133909887510bb867d87f3ca9a80f",
     "training_experiments.py": "8ede8198fc3b35491a93f0451dbc167be078a58c970221f3ca6e0151778cf8e1",
     "training_profiles/native_hybrid_ppo.json": "4909775f63fb417130399faba9a203c2a626f8462a657fdecc357a415b992d4d",
-    "training_runtime.py": "2ac7faae4a272e9ae106e15e7124acbc1fbd4283afc3c7ee2e5dd301f9540116",
+    "training_runtime.py": "45da190837b89510ff634db04caf543d631e9195130f5d3690913dd2c89add21",
     "vendor/firstlight/NOTICE": "1d304a6d3243fd6629e2127903729eba05f930669a9e318a674ad62b90cf43ba",
     "vendor/firstlight/probe/minimal_capture.inc": "8cacb5d7f80c2a09b2ad29b98f64ad6d878f760555bc74f94e4c458108b2b347"
   },
@@ -157,5 +158,26 @@
     ],
     "mps_available": false,
     "native_runtime": "Not exercised in this review; no strategy or throughput claims."
+  },
+  "next_scene_target_schema": "public_scene_value_v1",
+  "resume_state_schema": "native_training_resume_v2",
+  "fourth_static_review_verification": {
+    "command": "/opt/anaconda3/envs/clash-royale/bin/python -m unittest discover -s tests -v",
+    "tests_passed": 92,
+    "state_source": "Synthetic native-state and fault fixtures; no native battle comparison.",
+    "checks": [
+      "last sampling step interrupted before PPO update does not produce resumable state",
+      "callback cancellation at the exact budget cannot mark an unfinished update complete",
+      "resume manifest is published after all required state files are saved",
+      "resume config, RNG and league manifest identity checked before state mutation",
+      "future labels retain the last observed nonterminal successor without crossing episode boundaries",
+      "invalid label inputs clear pending buffer targets",
+      "collection rejects incompatible label schemas before publishing datasets",
+      "auxiliary scoring rejects non-finite, missing or incorrectly shaped predictions",
+      "offline next-card targets use the same normalization as training"
+    ],
+    "mps_available": false,
+    "native_runtime": "Not exercised in this review; no strategy or throughput claims.",
+    "compatibility": "Network dimensions unchanged; legacy resume states remain readable but lack v2 state-file identity checks."
   }
 }

@@ -5,7 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import numpy as np
 import torch
@@ -20,7 +20,11 @@ from native_engine.native_recurrent_model import (
 from native_engine.native_vec_env import native_observation_space, ENTITY_TARGET_SCHEMA, TRANSITION_TARGET_SCHEMA
 from native_engine.native_vec_env import CARD_IDS, _cycle_belief
 from types import SimpleNamespace
-from training_runtime import run_sb3_training, resume_directory, load_inference_model
+from training_runtime import (
+    run_sb3_training, resume_directory, load_inference_model, save_resume_state,
+    read_resume_state, restore_resume_state, TrainingTelemetryCallback,
+)
+from native_engine.native_vec_env import NEXT_SCENE_TARGET_SCHEMA, scene_value
 from one_click_train import validate_config
 from self_play import SelfPlayOpponentPool
 from auxiliary_validation import collect_dataset, score_dataset
@@ -374,6 +378,127 @@ class TrainingFixesTest(unittest.TestCase):
                     self.assertEqual(target[1], 0)
         env.close()
 
+    def test_future_targets_keep_last_observed_nonterminal_successor(self):
+        env = NativeBatchVecEnv(battles=2, batch_factory=lambda **kw: TerminalBatch(2))
+        try:
+            for horizon in (0, -1):
+                with self.assertRaisesRegex(ValueError, 'horizon'):
+                    EntityTargetRecurrentDictRolloutBuffer(4, native_observation_space(), env.action_space,
+                        (4, 1, 2, 8), n_envs=2, device='cpu', tbptt_steps=2, auxiliary_horizon=horizon)
+            buffer = EntityTargetRecurrentDictRolloutBuffer(4, native_observation_space(), env.action_space,
+                (4, 1, 2, 8), n_envs=2, device='cpu', tbptt_steps=2, auxiliary_horizon=2)
+            states = RNNStates((torch.zeros(1, 2, 8),)*2, (torch.zeros(1, 2, 8),)*2)
+            for step in range(4):
+                observation = {key: np.zeros((2, *space.shape), dtype=space.dtype)
+                               for key, space in native_observation_space().spaces.items()}
+                observation['scalar'][:, 0] = (step + 1) / 10
+                observation['scalar'][:, 8] = (0, 1)
+                infos = [{'entity_target_schema': ENTITY_TARGET_SCHEMA, 'entity_targets': np.zeros((MAX_ENTITIES, 4)),
+                          'transition_target_schema': TRANSITION_TARGET_SCHEMA, 'transition_targets': np.zeros(8),
+                          'next_scene_target_schema': NEXT_SCENE_TARGET_SCHEMA, 'next_scene_value': (step + 1) / 10}
+                         for _ in range(2)]
+                buffer.set_entity_targets(infos)
+                buffer.add(observation, np.zeros((2, 3)), np.zeros(2), np.asarray([step in (0, 3), step == 0]),
+                           torch.zeros(2), torch.zeros(2), lstm_states=states)
+            for sample in buffer.get(batch_size=8):
+                selected = sample.mask > 0
+                for scalar, target in zip(sample.observations['scalar'][selected], sample.future_targets[selected]):
+                    step, slot = round(float(scalar[0]) * 10) - 1, int(scalar[8])
+                    valid = step < 3 and not (slot == 0 and step == 2)
+                    self.assertEqual(bool(target[1]), valid)
+                    if valid:
+                        self.assertAlmostEqual(float(target[0]), (step + 2) / 10, places=6)
+            observation = env.reset()
+            for _ in range(3):
+                observation, _, dones, infos = env.step(np.zeros((2, 3), dtype=np.int64))
+                for slot, info in enumerate(infos):
+                    scalar = info['terminal_observation']['scalar'] if dones[slot] else observation['scalar'][slot]
+                    self.assertEqual(info['next_scene_target_schema'], NEXT_SCENE_TARGET_SCHEMA)
+                    self.assertAlmostEqual(info['next_scene_value'], float(scene_value(scalar)), places=7)
+            self.assertTrue(dones.all())
+            self.assertNotEqual(infos[0]['next_scene_value'], float(scene_value(observation['scalar'][0])))
+        finally:
+            env.close()
+
+    def test_buffer_rejects_bad_labels_without_reusing_pending_values(self):
+        env = NativeBatchVecEnv(battles=1)
+        try:
+            buffer = EntityTargetRecurrentDictRolloutBuffer(4, native_observation_space(), env.action_space,
+                (4, 1, 1, 8), n_envs=1, device='cpu', tbptt_steps=2, auxiliary_horizon=1)
+            good = {'entity_target_schema': ENTITY_TARGET_SCHEMA, 'entity_targets': np.zeros((MAX_ENTITIES, 4)),
+                    'transition_target_schema': TRANSITION_TARGET_SCHEMA, 'transition_targets': np.zeros(8),
+                    'next_scene_target_schema': NEXT_SCENE_TARGET_SCHEMA, 'next_scene_value': .2}
+            bad_infos = []
+            bad = copy.deepcopy(good); bad['entity_targets'][0, 0] = -.1; bad_infos.append(bad)
+            bad = copy.deepcopy(good); bad['entity_targets'][0, 1] = 2; bad_infos.append(bad)
+            bad = copy.deepcopy(good); bad['transition_targets'][7] = .5; bad_infos.append(bad)
+            bad = copy.deepcopy(good); bad['next_scene_value'] = float('nan'); bad_infos.append(bad)
+            bad = copy.deepcopy(good); bad['next_scene_target_schema'] = 'wrong'; bad_infos.append(bad)
+            for bad in bad_infos:
+                buffer.set_entity_targets([good])
+                with self.assertRaises(ValueError):
+                    buffer.set_entity_targets([bad])
+                with self.assertRaisesRegex(RuntimeError, 'missing native entity targets'):
+                    buffer.add()
+            terminal = dict(good)
+            terminal.pop('next_scene_value')
+            terminal['terminal_observation'] = {'scalar': np.full(12, np.nan)}
+            with self.assertRaisesRegex(ValueError, 'terminal scalar'):
+                buffer.set_entity_targets([terminal])
+        finally:
+            env.close()
+
+    def test_interrupt_at_last_sampling_step_is_not_a_completed_update(self):
+        for stop in ('interrupt', 'callback_false'):
+            with self.subTest(stop=stop), TemporaryDirectory() as directory:
+                root = Path(directory)
+                original = TrainingTelemetryCallback._on_step
+                def interrupt(callback):
+                    result = original(callback)
+                    if callback.num_timesteps == 16:
+                        if stop == 'interrupt':
+                            raise KeyboardInterrupt('before final rollout sample is added')
+                        return False
+                    return result
+                with patch.object(TrainingTelemetryCallback, '_on_step', interrupt):
+                    with self.assertRaises(KeyboardInterrupt if stop == 'interrupt' else ValueError):
+                        self.train(root)
+                interrupted = root / 'interrupted_model.zip'
+                model = NativeActionConditionedWorldModelPPO.load(interrupted, device='cpu')
+                self.assertEqual(model.num_timesteps, 16)
+                self.assertEqual(model._n_updates, 1)
+                self.assertFalse(resume_directory(interrupted).exists())
+                self.assertFalse((root / 'final_model.zip').exists())
+                completed = root / 'checkpoints/model_8_steps.zip'
+                self.assertEqual(read_resume_state(completed)['timesteps'], 8)
+
+    def test_resume_manifest_is_last_and_checks_rng_config_and_league(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / 'partial.zip'
+            checkpoint.write_bytes(b'weights')
+            model = SimpleNamespace(num_timesteps=8, get_env=lambda: SimpleNamespace(get_attr=lambda _: [99]))
+            pool = SimpleNamespace(save_state=MagicMock(side_effect=RuntimeError('league copy failed')))
+            with self.assertRaisesRegex(RuntimeError, 'league copy failed'):
+                save_resume_state(checkpoint, model, dict(self.config(), self_play_enabled=True), pool)
+            self.assertFalse((resume_directory(checkpoint) / 'runtime.json').exists())
+            self.train(root / 'train', dict(self.config(), self_play_enabled=True,
+                                           self_play_current_ratio=0, self_play_historical_ratio=1))
+            checkpoint = root / 'train/final_model.zip'
+            directory = resume_directory(checkpoint)
+            self.assertEqual(read_resume_state(checkpoint)['schema'], 'native_training_resume_v2')
+            for name in ('config.json', 'rng.pt', 'league/state.json'):
+                path = directory / name
+                original = path.read_bytes()
+                path.write_bytes(original + b' ')
+                env, pool = MagicMock(), MagicMock()
+                with self.subTest(file=name), self.assertRaisesRegex(ValueError, 'missing or changed'):
+                    restore_resume_state(checkpoint, env, pool)
+                env.seed.assert_not_called()
+                pool.restore_state.assert_not_called()
+                path.write_bytes(original)
+            self.assertEqual(read_resume_state(checkpoint)['timesteps'], 16)
+
     def test_checkpoints_and_logs_include_the_named_round_update(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -514,6 +639,52 @@ class TrainingFixesTest(unittest.TestCase):
                     infer.assert_not_called()
             result = score_dataset(config, model, dataset, batch_size=1)
             self.assertEqual(result['dataset']['samples'], 12)
+
+    def test_auxiliary_validation_rejects_invalid_predictions_and_collection_schemas(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self.config()
+            self.train(root / 'train', config)
+            model = load_inference_model(NativeActionConditionedWorldModelPPO, root / 'train/final_model.zip', 'cpu')
+            with patch('native_engine.native_vec_env.Batch', side_effect=lambda **kw: TerminalBatch(kw['battles'])):
+                dataset = collect_dataset(config, model, root / 'validation.npz', seed_count=2, decisions=4, battles=2)
+            predict = model.policy.auxiliary_predictions
+            for kind in ('nan', 'inf', 'shape', 'missing'):
+                def corrupt(*args, **kwargs):
+                    values = predict(*args, **kwargs)
+                    if kind in ('nan', 'inf'):
+                        values['tower_delta'] = torch.full_like(values['tower_delta'], float(kind))
+                    elif kind == 'shape':
+                        values['future_value'] = values['future_value'].unsqueeze(-1)
+                    else:
+                        values.pop('entity_death')
+                    return values
+                with self.subTest(kind=kind), patch.object(model.policy, 'auxiliary_predictions', side_effect=corrupt):
+                    with self.assertRaisesRegex(ValueError, 'invalid auxiliary prediction'):
+                        score_dataset(config, model, dataset)
+            with np.load(dataset, allow_pickle=False) as archive:
+                data = {key: archive[key].copy() for key in archive.files}
+            data['obs_public_belief'][:, 8:16] *= .5
+            scaled = root / 'scaled_belief.npz'
+            np.savez_compressed(scaled, **data)
+            def uniform_next_card(*args, **kwargs):
+                values = predict(*args, **kwargs)
+                values['opponent_next_card'] = torch.zeros_like(values['opponent_next_card'])
+                return values
+            with patch.object(model.policy, 'auxiliary_predictions', side_effect=uniform_next_card):
+                metrics = score_dataset(config, model, scaled)['metrics']
+                self.assertAlmostEqual(metrics['public_next_card_cross_entropy'], np.log(8), places=6)
+            class WrongSchemaEnv(NativeBatchVecEnv):
+                def step_wait(self):
+                    observation, rewards, dones, infos = super().step_wait()
+                    infos[0]['entity_target_schema'] = 'wrong'
+                    return observation, rewards, dones, infos
+            env = WrongSchemaEnv(battles=2, batch_factory=lambda **kw: TerminalBatch(2))
+            with patch('auxiliary_validation.load_object', return_value=lambda **kw: env):
+                with self.assertRaisesRegex(ValueError, 'incompatible entity_target_schema'):
+                    collect_dataset(config, model, root / 'bad_collection.npz', seed_count=2, decisions=4, battles=2)
+            self.assertTrue(env.closed)
+            self.assertFalse((root / 'bad_collection.npz').exists())
 
     def test_replay_records_real_tick_when_terminal_step_is_short(self):
         class ShortTerminalBatch(FakeBatch):

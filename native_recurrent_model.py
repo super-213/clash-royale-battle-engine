@@ -37,7 +37,7 @@ from .native_world_model import (
 from .native_vec_env import (
     ENTITY_TARGET_SCHEMA, MAX_ENTITIES,
     EXECUTED_ACTION_SCHEMA, EXECUTED_ACTION_FEATURES,
-    TRANSITION_TARGET_SCHEMA,
+    TRANSITION_TARGET_SCHEMA, NEXT_SCENE_TARGET_SCHEMA, scene_value,
 )
 
 
@@ -121,6 +121,8 @@ class EntityTargetRecurrentDictRolloutBuffer(TruncatedRecurrentDictRolloutBuffer
 
     def __init__(self, *args, auxiliary_horizon=4, **kwargs):
         self.auxiliary_horizon = int(auxiliary_horizon)
+        if self.auxiliary_horizon <= 0:
+            raise ValueError("auxiliary_horizon must be positive")
         super().__init__(*args, **kwargs)
 
     def reset(self):
@@ -130,11 +132,12 @@ class EntityTargetRecurrentDictRolloutBuffer(TruncatedRecurrentDictRolloutBuffer
         )
         self._pending_entity_targets = None
         self.transition_targets = np.zeros((self.buffer_size, self.n_envs, 8), dtype=np.float32)
-        self.terminal_values = np.zeros((self.buffer_size, self.n_envs, 2), dtype=np.float32)
+        self.successor_values = np.zeros((self.buffer_size, self.n_envs, 2), dtype=np.float32)
         self._pending_transition_targets = None
-        self._pending_terminal_values = None
+        self._pending_successor_values = None
 
     def set_entity_targets(self, infos):
+        self._pending_entity_targets = self._pending_transition_targets = self._pending_successor_values = None
         if len(infos) != self.n_envs or any(
             info.get("entity_target_schema") != ENTITY_TARGET_SCHEMA
             for info in infos
@@ -147,49 +150,63 @@ class EntityTargetRecurrentDictRolloutBuffer(TruncatedRecurrentDictRolloutBuffer
             raise ValueError("invalid native entity target shape")
         if not np.isfinite(targets).all():
             raise ValueError("native entity targets must be finite")
+        if (not np.isin(targets[..., (0, 3)], (0, 1)).all()
+                or np.any(np.abs(targets[..., 1:3]) > 1)):
+            raise ValueError("invalid native entity target flags or displacement")
         if any(info.get("transition_target_schema") != TRANSITION_TARGET_SCHEMA for info in infos):
             raise ValueError("world-model training requires public_damage_result_v2 labels")
         transitions = np.stack([info["transition_targets"] for info in infos])
         if transitions.shape != (self.n_envs, 8) or not np.isfinite(transitions).all():
             raise ValueError("invalid public transition targets")
-        terminal = np.zeros((self.n_envs, 2), dtype=np.float32)
+        if (not np.isin(transitions[:, 7], (0, 1)).all() or np.any(np.abs(transitions[:, :2]) > 1)
+                or np.any((transitions[:, 2:7] < 0) | (transitions[:, 2:7] > 1))):
+            raise ValueError("invalid public transition target flags or range")
+        successors = np.zeros((self.n_envs, 2), dtype=np.float32)
         for index, info in enumerate(infos):
-            if "terminal_observation" in info:
-                scalar = info["terminal_observation"]["scalar"]
-                terminal[index] = (scalar[9] - scalar[10] + 0.25 * (scalar[2] - scalar[3]), 1)
+            if "next_scene_value" in info:
+                value = info["next_scene_value"]
+                if (info.get("next_scene_target_schema") != NEXT_SCENE_TARGET_SCHEMA
+                        or not np.isscalar(value) or not np.isfinite(value) or abs(value) > 1.25):
+                    raise ValueError("invalid public successor scene target")
+                successors[index] = (value, 1)
+            elif "terminal_observation" in info:
+                scalar = np.asarray(info["terminal_observation"]["scalar"])
+                if scalar.shape != self.observation_space['scalar'].shape or not np.isfinite(scalar).all():
+                    raise ValueError("invalid terminal scalar target")
+                successors[index] = (scene_value(scalar), 1)
         self._pending_entity_targets = targets
         self._pending_transition_targets = transitions
-        self._pending_terminal_values = terminal
+        self._pending_successor_values = successors
 
     def add(self, *args, **kwargs):
         if self._pending_entity_targets is None:
             raise RuntimeError("missing native entity targets for rollout step")
         self.entity_targets[self.pos] = self._pending_entity_targets
         self.transition_targets[self.pos] = self._pending_transition_targets
-        self.terminal_values[self.pos] = self._pending_terminal_values
+        self.successor_values[self.pos] = self._pending_successor_values
         self._pending_entity_targets = None
-        self._pending_transition_targets = self._pending_terminal_values = None
+        self._pending_transition_targets = self._pending_successor_values = None
         super().add(*args, **kwargs)
 
     def get(self, batch_size=None):
         if not self.generator_ready:
             # Labels can cross TBPTT/minibatch boundaries; gradients still cannot.
-            # Use terminal scalar at t+h even when the rollout contains a reset.
+            # Store the observed successor, including the last nonterminal step.
+            # Never substitute an auto-reset observation for a terminal state.
             future = np.zeros((self.buffer_size, self.n_envs, 2), dtype=np.float32)
             scalar = self.observations["scalar"]
             for step in range(self.buffer_size):
                 endpoint = step + self.auxiliary_horizon
                 if endpoint < self.buffer_size:
                     valid = ~self.episode_starts[step + 1:endpoint + 1].astype(bool).any(axis=0)
-                    values = scalar[endpoint, :, 9] - scalar[endpoint, :, 10] + 0.25 * (
-                        scalar[endpoint, :, 2] - scalar[endpoint, :, 3])
+                    values = scene_value(scalar[endpoint])
                     future[step, :, 0] = values
                     future[step, :, 1] = valid
                 if endpoint - 1 < self.buffer_size:
-                    terminal = self.terminal_values[endpoint - 1]
-                    valid = (terminal[:, 1] > 0.5) & ~self.episode_starts[
+                    successor = self.successor_values[endpoint - 1]
+                    valid = (successor[:, 1] > 0.5) & ~self.episode_starts[
                         step + 1:endpoint].astype(bool).any(axis=0)
-                    future[step, valid] = terminal[valid]
+                    future[step, valid] = successor[valid]
             self.future_targets = self.swap_and_flatten(future)
             self.transition_targets = self.swap_and_flatten(self.transition_targets)
             self.entity_targets = self.swap_and_flatten(self.entity_targets)
@@ -222,6 +239,8 @@ class ActionTargetRecurrentDictRolloutBuffer(EntityTargetRecurrentDictRolloutBuf
         self._pending_executed_actions = None
 
     def set_entity_targets(self, infos):
+        self._pending_executed_actions = None
+        self._pending_entity_targets = self._pending_transition_targets = self._pending_successor_values = None
         if len(infos) != self.n_envs or any(
             info.get("executed_action_schema") != EXECUTED_ACTION_SCHEMA
             for info in infos

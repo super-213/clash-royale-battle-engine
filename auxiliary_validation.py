@@ -13,13 +13,10 @@ from fixed_evaluation import checkpoint_spec, preserve_random_state
 from native_engine.native_vec_env import (
     ENTITY_TARGET_SCHEMA, EXECUTED_ACTION_SCHEMA, EXECUTED_ACTION_FEATURES,
     MAX_ENTITIES, TRANSITION_TARGET_SCHEMA,
+    scene_value,
 )
 
 DATASET_SCHEMA = 'native_auxiliary_validation_v2'
-
-
-def scene_value(scalar):
-    return scalar[..., 9] - scalar[..., 10] + .25 * (scalar[..., 2] - scalar[..., 3])
 
 
 def collect_dataset(config, model, output, seed_base=2_900_001, seed_count=8,
@@ -68,6 +65,11 @@ def collect_dataset(config, model, output, seed_base=2_900_001, seed_count=8,
                 after, _, dones, infos = env.step(actions)
                 step_rows = []
                 for slot, info in enumerate(infos):
+                    for key, expected in (('entity_target_schema', ENTITY_TARGET_SCHEMA),
+                                          ('transition_target_schema', TRANSITION_TARGET_SCHEMA),
+                                          ('executed_action_schema', EXECUTED_ACTION_SCHEMA)):
+                        if info.get(key) != expected:
+                            raise ValueError(f'collection environment returned an incompatible {key}')
                     scalar = info.get('terminal_observation', {}).get('scalar', after['scalar'][slot])
                     row = {f'obs_{key}': value[slot].copy() for key, value in observation.items()}
                     row.update(wave=wave, decision=decision, slot=slot,
@@ -96,7 +98,7 @@ def collect_dataset(config, model, output, seed_base=2_900_001, seed_count=8,
     for name, value in sorted(model.policy.state_dict().items()):
         weights.update(name.encode())
         weights.update(value.detach().cpu().contiguous().numpy().tobytes())
-    arrays['metadata'] = np.asarray(json.dumps({
+    metadata = {
         'schema': DATASET_SCHEMA, 'observation_schema': env.observation_schema,
         'entity_target_schema': ENTITY_TARGET_SCHEMA,
         'executed_action_schema': EXECUTED_ACTION_SCHEMA,
@@ -107,9 +109,11 @@ def collect_dataset(config, model, output, seed_base=2_900_001, seed_count=8,
         'collection_policy': config['policy'], 'collection_weights_sha256': weights.hexdigest(),
         'collection_checkpoint': collection_checkpoint,
         'scope': 'Public dynamics and public belief reconstruction; no true hidden-state labels.',
-    }))
+    }
+    arrays['metadata'] = np.asarray(json.dumps(metadata))
+    _validated_groups(arrays, metadata, model.observation_space)
     output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open('wb') as stream:
+    with output.open('xb') as stream:
         np.savez_compressed(stream, **arrays)
     return output
 
@@ -141,6 +145,12 @@ def _validated_groups(data, metadata, observation_space):
                   data['transition_targets'][:, 7], data['future_targets'][:, 1]):
         if not np.isin(value, (0, 1)).all():
             raise ValueError('invalid dataset target validity flag')
+    transitions = data['transition_targets']
+    if (np.any(np.abs(data['entity_targets'][..., 1:3]) > 1)
+            or np.any(np.abs(transitions[:, :2]) > 1)
+            or np.any((transitions[:, 2:7] < 0) | (transitions[:, 2:7] > 1))
+            or np.any(np.abs(data['next_scene']) > 1.25)):
+        raise ValueError('dataset target outside its public range')
     actions = data['executed_action']
     if (np.any((actions < 0) | (actions > 1)) or not np.isin(actions[:, :9], (0, 1)).all()
             or np.any(actions[:, :9].sum(-1) != 1) or np.any(actions[actions[:, 0] == 1, -2:] != 0)):
@@ -251,7 +261,15 @@ def score_dataset(config, model, dataset, batch_size=64):
                 actions = torch.as_tensor(data['executed_action'][chosen], device=model.device)
                 predictions = model.policy.auxiliary_predictions(
                     executed_actions=actions if model.policy.action_conditioned else None)
-                for key, value in predictions.items():
+                shapes = dict(tower_delta=(len(chosen), 2), damage_source=(len(chosen), 5),
+                              opponent_elixir=(len(chosen), 5), opponent_hand=(len(chosen), 8),
+                              opponent_next_card=(len(chosen), 8), entity_death=(len(chosen), MAX_ENTITIES),
+                              entity_position_delta=(len(chosen), MAX_ENTITIES, 2), future_value=(len(chosen),))
+                for key, shape in shapes.items():
+                    value = predictions.get(key)
+                    if (not torch.is_tensor(value) or tuple(value.shape) != shape
+                            or not value.is_floating_point() or not torch.isfinite(value).all()):
+                        raise ValueError(f'invalid auxiliary prediction: {key}')
                     collected.setdefault(key, []).append(value.cpu())
             states = tuple(torch.cat(values, dim=1) for values in next_states)
     pred = {key: torch.cat(value) for key, value in collected.items()}
@@ -264,11 +282,14 @@ def score_dataset(config, model, dataset, batch_size=64):
     belief = torch.tensor(data['obs_public_belief'])
     def mean(value, mask=None):
         selected = value if mask is None else value[mask]
+        if not torch.isfinite(selected).all():
+            raise ValueError('non-finite auxiliary metric')
         return float(selected.mean()) if selected.numel() else None
     death = pred['entity_death'] >= 0
     actual_death = targets[..., 0] > .5
     next_targets = belief[:, 8:16]
     next_valid = next_targets.sum(-1) > 0
+    next_targets = next_targets / next_targets.sum(-1, keepdim=True).clamp_min(1e-6)
     hand_valid = belief[:, :8].sum(-1) > 0
     metrics = {
         'tower_delta_mae': mean((pred['tower_delta'] - transition[:, :2]).abs().mean(-1), transition[:, 7] > .5),

@@ -46,6 +46,7 @@ ENTITY_TARGET_SCHEMA = "native_entity_id_v1"
 EXECUTED_ACTION_SCHEMA = "executed_card_xy_v1"
 EXECUTED_ACTION_FEATURES = 11  # wait, eight card identities, normalized x/y
 TRANSITION_TARGET_SCHEMA = "public_damage_result_v2"
+NEXT_SCENE_TARGET_SCHEMA = "public_scene_value_v1"
 FIRST_PLAYABLE_TICK = 90
 TICK_SECONDS = 0.05
 MATCH_SECONDS = 300.0
@@ -66,6 +67,10 @@ _INITIAL_CYCLE_STATES = tuple(
     (frozenset(set(CARD_IDS).difference(queue)), queue)
     for queue in permutations(CARD_IDS, 4)
 )
+
+
+def scene_value(scalar):
+    return scalar[..., 9] - scalar[..., 10] + .25 * (scalar[..., 2] - scalar[..., 3])
 
 
 def _executed_action_features(owner, plays, receipts, events):
@@ -631,7 +636,13 @@ class NativeBatchVecEnv(VecEnv):
                 self._begin_episode(self.slots[index], state, episode_seed)
                 self.reset_infos[index] = self._reset_info(self.slots[index])
 
-        return self._stack_observations(), rewards, dones, infos
+        observations = self._stack_observations()
+        for index, info in enumerate(infos):
+            scalar = (terminal_observations[index]['scalar'] if dones[index]
+                      else observations['scalar'][index])
+            info['next_scene_target_schema'] = NEXT_SCENE_TARGET_SCHEMA
+            info['next_scene_value'] = float(scene_value(scalar))
+        return observations, rewards, dones, infos
 
     def _action_to_play(self, slot, owner, action):
         values = np.asarray(action, dtype=np.int64).reshape(-1)

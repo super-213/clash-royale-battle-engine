@@ -130,7 +130,9 @@ checkpoint 和消融实验使用。
 除外。伤害结果按 ID 对齐的非投射物 HP 损失计算，新增单位血量不再抵消已有伤害。
 当前公开估计监督对手圣水区间与卡序 belief；未来局面指标默认使用4个决策后的
 塔血与皇冠差，约为2秒。未来标签可跨 TBPTT/minibatch 切分，但不跨新局；精确落在
-终局时使用 terminal observation。rollout 尾部缺少后继时仍无该项标签。
+终局时使用 terminal observation。环境通过 `public_scene_value_v1` 后继标签保存每步实际
+到达的场景值，包括 rollout 最后一步的非终局状态；只有 horizon 超出已采集范围或提前
+终局时才排除。标签验证失败后会清空待写入值，避免复用上一步标签。
 
 ## 独立固定评估赛程
 
@@ -300,13 +302,16 @@ conda run -n clash-royale python train_native.py --rounds 10 --output artifacts/
 策略当成初始基线。新保存的状态记录初始基线和历史对手快照的 SHA-256，恢复前核验；
 历史快照注册后在加载和保存时也核验身份。旧状态若没有这些校验值，只能检查文件存在，
 无法追溯验证其内容是否被替换。
+新状态采用 `native_training_resume_v2`，同时保存配置、全局 RNG 文件和联赛清单的
+SHA-256；所有必要文件写入成功后才发布 `runtime.json`，恢复前先核验这些文件。
+旧无 schema 状态保留兼容读取，但无法追溯核验这些额外文件的身份。
 
 历史对手、固定评估和离线检查使用 `load_inference_model`，加载后释放训练 rollout
 缓冲区和优化器状态；该对象仅用于推理。续训使用标准 `algorithm.load`，保留完整优化器。
 每次运行记录 `source_sha256.json`，并在 `summary.json` 中保存启动时的源码哈希；
 训练期间源码发生变化会使运行失效。正式实验汇总同时核验其与计划一致，哈希范围包括
 Python、训练配置、依赖约束和原生 probe 源码。已有旧计划应保留历史记录，使用修复后
-源码重新生成计划；当前计划为 `artifacts/experiments/20261010_static_review_3/plan.json`。
+源码重新生成计划；当前计划为 `artifacts/experiments/20261010_static_review_4/plan.json`。
 运行时也拒绝含训练产物的输出目录，且独占创建源码记录，防止重试或并发调用覆盖旧运行。
 已准备的 `config.json`、`console.log`、`status.json` 可以保留。
 
@@ -317,6 +322,8 @@ Python、训练配置、依赖约束和原生 probe 源码。已有旧计划应�
 中断后的 `interrupted_model.zip` 是尽力保存的权重，可能处于采样或优化中间；恢复时
 优先使用最近一个完整的 `checkpoints/*.zip` 及其状态目录。最终轮在固定评估之前额外
 保存，评估失败也保留完整的训练检查点。
+`interrupted_model.zip` 仅在已确认完成 PPO 更新的边界才保存续训状态，步数恰好整除
+rollout 不能单独证明更新完成。回调提前停止也不能把未完成更新的模型标记为完整训练。
 
 ## 探索诊断与策略回放
 
@@ -356,6 +363,9 @@ conda run -n clash-royale python auxiliary_validation.py evaluate \
 当前格式为 `native_auxiliary_validation_v2`，保存 slot、终局标记和后继场景值。评分前
 核验数组形状、有限值、观测范围、动作编码、时间／slot 顺序、重置边界，以及未来标签
 是否对应同局的指定 horizon。旧 v1 数据缺少这些校验字段，需要重新采集。
+采集端核验环境返回的标签 schema 和数值范围后才写入数据文件，独占创建文件以防覆盖。
+评分核验辅助头输出形状及有限值，拒绝 NaN／Inf 指标；下一张牌目标与训练采用相同的
+概率归一化方式。
 支持 v5/v6，v4 没有辅助头，不参与辅助预测评分。输出塔血/位移/短期指标 MAE、实体
 消失 BCE/准确率、伤害结果准确率，以及公开圣水/卡序重构指标和有效标签数。
 

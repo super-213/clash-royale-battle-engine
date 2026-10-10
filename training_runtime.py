@@ -105,16 +105,44 @@ def save_resume_state(checkpoint, model, config, pool=None, telemetry=None):
         state.update(episodes=telemetry.episode_count,
                      episode_rewards=list(telemetry.episode_rewards),
                      episode_lengths=list(telemetry.episode_lengths))
-    _atomic_json(directory / "runtime.json", state)
     if pool is not None:
         pool.save_state(directory / "league")
+    files = ["config.json", "rng.pt"]
+    if pool is not None:
+        files.append("league/state.json")
+    state["schema"] = "native_training_resume_v2"
+    state["files_sha256"] = {name: _sha256(directory / name) for name in files}
+    # Publish the manifest only after every required state file is saved.
+    _atomic_json(directory / "runtime.json", state)
 
 
-def restore_resume_state(checkpoint, env, pool=None, telemetry=None):
+def read_resume_state(checkpoint):
     directory = resume_directory(checkpoint)
     saved = json.loads((directory / "runtime.json").read_text())
     if saved["model_sha256"] != _sha256(checkpoint):
         raise ValueError("resume model no longer matches its saved runtime state")
+    if saved.get("schema") is not None:
+        if saved["schema"] != "native_training_resume_v2":
+            raise ValueError("unsupported resume state schema")
+        hashes = saved.get("files_sha256", {})
+        if not isinstance(hashes, dict) or not {"config.json", "rng.pt"} <= hashes.keys():
+            raise ValueError("resume state is missing required file identities")
+        if hashes.keys() - {"config.json", "rng.pt", "league/state.json"}:
+            raise ValueError("resume state contains unknown file identities")
+        for name, expected in hashes.items():
+            path = directory / name
+            if not path.is_file() or _sha256(path) != expected:
+                raise ValueError(f"resume state file is missing or changed: {name}")
+        config = json.loads((directory / "config.json").read_text())
+        if config.get("self_play_enabled") and "league/state.json" not in hashes:
+            raise ValueError("resume state is missing its league identity")
+    return saved
+
+
+def restore_resume_state(checkpoint, env, pool=None, telemetry=None):
+    directory = resume_directory(checkpoint)
+    saved = read_resume_state(checkpoint)
+    rng = torch.load(directory / "rng.pt", map_location="cpu", weights_only=False)
     if "next_native_seed" in saved:
         env.seed(saved["next_native_seed"])
     if pool is not None:
@@ -123,7 +151,6 @@ def restore_resume_state(checkpoint, env, pool=None, telemetry=None):
         telemetry.episode_count = saved.get("episodes", 0)
         telemetry.episode_rewards.extend(saved.get("episode_rewards", []))
         telemetry.episode_lengths.extend(saved.get("episode_lengths", []))
-    rng = torch.load(directory / "rng.pt", map_location="cpu", weights_only=False)
     random.setstate(rng["python"])
     np.random.set_state(rng["numpy"])
     torch.set_rng_state(rng["torch"])
@@ -141,8 +168,11 @@ class UpdatedCheckpointCallback(BaseCallback):
         self.root, self.config, self.pool = Path(run_dir), config, pool
         self.telemetry = None
         self.saved_rounds = set()
+        self.last_completed_timesteps = None
 
     def _save_completed(self, force=False):
+        if self.model.num_timesteps % int(self.config["rollout_decisions"]):
+            return
         completed = self.model.num_timesteps // int(self.config["rollout_decisions"])
         if completed <= 0 or completed in self.saved_rounds:
             return
@@ -156,12 +186,15 @@ class UpdatedCheckpointCallback(BaseCallback):
         self.saved_rounds.add(completed)
 
     def _on_rollout_start(self):
+        self.last_completed_timesteps = self.model.num_timesteps
         self._save_completed()
 
     def _on_training_end(self):
         # Runs before deferred evaluation, so an evaluation failure cannot lose
         # the final completed optimizer update or its resumable league state.
-        self._save_completed(force=True)
+        if self.model.rollout_buffer.full:
+            self.last_completed_timesteps = self.model.num_timesteps
+            self._save_completed(force=True)
 
     def _on_step(self):
         return True
@@ -927,6 +960,7 @@ def _run_sb3_training(config, run_dir, resources):
     )
     resume_from = config.get("resume_from")
     if resume_from:
+        read_resume_state(resume_from)
         saved_config = json.loads((resume_directory(resume_from) / "config.json").read_text())
         allowed_changes = {"rounds", "device", "port", "evaluation_port", "run_name", "run_dir",
                            "created_at", "resume_from", "auto_bootstrap", "_initial_policy_path"}
@@ -1038,6 +1072,8 @@ def _run_sb3_training(config, run_dir, resources):
             progress_bar=False,
             log_interval=1,
         )
+        if model.num_timesteps != total_timesteps or checkpoint.last_completed_timesteps != model.num_timesteps:
+            raise ValueError("training ended before completing the requested interaction budget and PPO updates")
         if source_hashes() != source_at_start:
             raise ValueError("training source changed during this run; use a fresh run")
         model.save(model_path.with_suffix(""))
@@ -1079,7 +1115,8 @@ def _run_sb3_training(config, run_dir, resources):
             elapsed = time.monotonic() - started
             interrupted_path = run_dir / "interrupted_model.zip"
             model.save(interrupted_path.with_suffix(""))
-            if model.num_timesteps % rollout_decisions == 0 and not model.rollout_buffer.full:
+            if (model.num_timesteps == checkpoint.last_completed_timesteps
+                    and model.num_timesteps % rollout_decisions == 0 and not model.rollout_buffer.full):
                 save_resume_state(interrupted_path, model, config, self_play_pool, telemetry)
             generate_charts(run_dir, telemetry.records)
             metadata = _model_metadata(
