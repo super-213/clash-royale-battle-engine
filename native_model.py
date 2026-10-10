@@ -245,7 +245,10 @@ class HierarchicalMaskedDistribution(Distribution):
         return nn.Linear(latent_dim, 5 + 4 * TILES)
 
     def proba_distribution(self, action_logits, action_masks):
-        masks = action_masks.reshape(-1, 5, TILES).bool()
+        masks = action_masks.reshape(-1, 5, TILES).bool().clone()
+        # Recurrent minibatches pad observations with zeros. Give those rows a
+        # finite, deterministic wait distribution; they are excluded from loss.
+        masks[:, 0, 0] |= ~masks.flatten(1).any(dim=1)
         slot_logits = action_logits[:, :5]
         position_logits = action_logits[:, 5:].reshape(-1, 4, TILES)
         minimum = torch.finfo(action_logits.dtype).min
@@ -270,13 +273,19 @@ class HierarchicalMaskedDistribution(Distribution):
         return torch.stack((slots, tiles // ARENA_WIDTH, tiles % ARENA_WIDTH), dim=1)
 
     def _tiles_for_slots(self, slots, deterministic):
-        all_tiles = torch.stack([
-            torch.argmax(distribution.probs, dim=1)
-            if deterministic else distribution.sample()
+        all_probabilities = torch.stack([
+            distribution.probs
             for distribution in self.position_distributions
         ], dim=1)
-        indices = (slots - 1).clamp(0, 3).unsqueeze(1)
-        return all_tiles.gather(1, indices).squeeze(1)
+        rows = torch.arange(slots.shape[0], device=slots.device)
+        probabilities = all_probabilities[rows, (slots - 1).clamp(0, 3)]
+        wait_probabilities = torch.zeros_like(probabilities)
+        wait_probabilities[:, 0] = 1
+        probabilities = torch.where(
+            (slots == 0).unsqueeze(1), wait_probabilities, probabilities
+        )
+        return (probabilities.argmax(dim=1) if deterministic
+                else torch.multinomial(probabilities, 1).squeeze(1))
 
     def _sanitize(self, slots, tiles):
         rows = torch.arange(slots.shape[0], device=slots.device)
@@ -296,19 +305,34 @@ class HierarchicalMaskedDistribution(Distribution):
         return self._decode(slots, tiles)
 
     def log_prob(self, actions):
-        actions = actions.long()
-        slots = actions[:, 0]
-        tiles = actions[:, 1] * ARENA_WIDTH + actions[:, 2]
+        count = self.action_masks.shape[0]
+        if actions.shape != (count, 3) or actions.is_complex() or actions.dtype == torch.bool:
+            raise ValueError("actions must be a numeric tensor of shape (batch, 3)")
+        supported = torch.isfinite(actions).all(dim=1) & (actions == actions.round()).all(dim=1)
+        supported &= (
+            (actions[:, 0] >= 0) & (actions[:, 0] < 5)
+            & (actions[:, 1] >= 0) & (actions[:, 1] < ARENA_HEIGHT)
+            & (actions[:, 2] >= 0) & (actions[:, 2] < ARENA_WIDTH)
+        )
+        # Clamp before conversion/indexing so unsupported encodings yield -inf
+        # rather than aliasing a tile, truncating a fraction or raising an index error.
+        safe = torch.nan_to_num(actions)
+        slots = safe[:, 0].clamp(0, 4).long()
+        tiles = (safe[:, 1].clamp(0, ARENA_HEIGHT - 1).long() * ARENA_WIDTH
+                 + safe[:, 2].clamp(0, ARENA_WIDTH - 1).long())
+        rows = torch.arange(count, device=slots.device)
+        supported &= self.action_masks[rows, slots, tiles]
+        supported &= (slots != 0) | ((actions[:, 1] == 0) & (actions[:, 2] == 0))
         slot_log_prob = self.slot_distribution.log_prob(slots)
         position_log_probs = torch.stack([
             distribution.log_prob(tiles)
             for distribution in self.position_distributions
         ], dim=1)
-        indices = (slots - 1).clamp(0, 3).unsqueeze(1)
-        selected = position_log_probs.gather(1, indices).squeeze(1)
-        return slot_log_prob + torch.where(
+        selected = position_log_probs.gather(1, (slots - 1).clamp(0, 3).unsqueeze(1)).squeeze(1)
+        result = slot_log_prob + torch.where(
             slots == 0, torch.zeros_like(selected), selected
         )
+        return result.masked_fill(~supported, -torch.inf)
 
     def entropy_components(self):
         per_slot = torch.stack([

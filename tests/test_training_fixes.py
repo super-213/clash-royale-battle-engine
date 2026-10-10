@@ -417,7 +417,7 @@ class TrainingFixesTest(unittest.TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             config = variant_config(self.config(), 'v4')
-            config.update(rounds=1, epochs=2)
+            config.update(rounds=1, epochs_per_round=2)
             config['algorithm_kwargs'].update(clip_range_vf=.2, target_kl=.03)
             self.train(root / 'shared', config)
             with patch.object(NativeRecurrentPPO, 'train', RecurrentPPO.train):

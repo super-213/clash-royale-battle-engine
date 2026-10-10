@@ -134,6 +134,92 @@ class FakeBatch:
         self.closed = True
 
 
+class HierarchicalDistributionTest(unittest.TestCase):
+    def distribution(self, logits, masks):
+        return model_module.HierarchicalMaskedDistribution().proba_distribution(logits, masks)
+
+    def test_joint_probabilities_and_entropy_match_public_support(self):
+        tiles = model_module.TILES
+        masks = torch.zeros((4, 5, tiles), dtype=torch.bool)
+        masks[:, 0, 0] = True
+        masks[:, 1, (0, 1)] = True
+        masks[:, 4, 20] = True
+        logits = torch.zeros((4, 5 + 4 * tiles), requires_grad=True)
+        with torch.no_grad():
+            logits[:, :5] = torch.tensor((2., 3., 100., 100., 5.)).log()
+            logits[:, 5:7] = torch.tensor((1., 3.)).log()
+        distribution = self.distribution(logits, masks)
+        actions = torch.tensor(((0, 0, 0), (1, 0, 0), (1, 0, 1), (4, 1, 2)))
+        probabilities = distribution.log_prob(actions).exp()
+        expected = torch.tensor((.2, .075, .225, .5))
+        torch.testing.assert_close(probabilities, expected)
+        torch.testing.assert_close(probabilities.sum(), torch.tensor(1.))
+        expected_entropy = -(expected * expected.log()).sum()
+        torch.testing.assert_close(distribution.entropy(), expected_entropy.expand(4))
+        (-distribution.log_prob(actions).mean() - distribution.entropy().mean()).backward()
+        self.assertTrue(torch.isfinite(logits.grad).all())
+        self.assertEqual(torch.count_nonzero(logits.grad[:, 2:4]).item(), 0)
+        # The caller's mask must remain intact when padding support is added.
+        self.assertTrue(torch.equal(distribution.action_masks, masks))
+
+    def test_unsupported_encodings_have_zero_probability(self):
+        actions = torch.tensor((
+            (0, 0, 1), (0, 1, 0), (1, 0, 18), (1, 32, 0),
+            (1, -1, 0), (1, 0, -1), (-1, 0, 0), (5, 0, 0),
+            (1.5, 0, 0), (1, .5, 0), (1, 0, .5),
+            (1, 0, float('nan')), (float('inf'), 0, 0),
+            (1, 0, 1e300), (1, 0, -1e300), (2, 0, 0), (1, 0, 2),
+        ), dtype=torch.float64)
+        masks = torch.zeros((len(actions), 5, model_module.TILES), dtype=torch.bool)
+        masks[:, 0, 0] = True
+        masks[:, 1, (0, 18)] = True
+        distribution = self.distribution(torch.zeros((len(actions), 5 + 4 * model_module.TILES)), masks)
+        self.assertTrue(torch.isneginf(distribution.log_prob(actions)).all())
+        for malformed in (actions[:, :2], actions.bool(), actions.to(torch.complex128)):
+            with self.subTest(dtype=malformed.dtype, shape=malformed.shape):
+                with self.assertRaisesRegex(ValueError, 'shape'):
+                    distribution.log_prob(malformed)
+
+    def test_samples_only_the_selected_conditional_distribution(self):
+        masks = torch.zeros((3, 5, model_module.TILES), dtype=torch.bool)
+        masks[0, 0, 0] = True
+        masks[1, 1, (0, 1)] = True
+        masks[2, 4, 20] = True
+        logits = torch.zeros((3, 5 + 4 * model_module.TILES))
+        logits[1, 6] = 1
+        distribution = self.distribution(logits, masks)
+        with patch.object(torch, 'multinomial', wraps=torch.multinomial) as sample:
+            actions = distribution.sample()
+        self.assertEqual(sample.call_count, 2)  # One slot draw and one tile draw.
+        rows = torch.arange(3)
+        self.assertTrue(masks[rows, actions[:, 0], actions[:, 1] * 18 + actions[:, 2]].all())
+        conditional = sample.call_args_list[1].args[0]
+        torch.testing.assert_close(conditional[0, 0], torch.tensor(1.))
+        torch.testing.assert_close(conditional[1], distribution.position_distributions[0].probs[1])
+        torch.testing.assert_close(conditional[2], distribution.position_distributions[3].probs[2])
+        torch.testing.assert_close(distribution.mode(), torch.tensor(((0, 0, 0), (1, 0, 1), (4, 1, 2))))
+
+    def test_recurrent_padding_has_finite_wait_probability_and_gradients(self):
+        masks = torch.zeros((4, 5, model_module.TILES), dtype=torch.bool)
+        masks[0, 0, 0] = masks[2, 0, 0] = True
+        masks[0, 1, 0] = masks[2, 4, 20] = True
+        original = masks.clone()
+        logits = torch.randn((4, 5 + 4 * model_module.TILES), requires_grad=True)
+        distribution = self.distribution(logits, masks)
+        actions = distribution.sample()
+        valid = torch.tensor((True, False, True, False))
+        torch.testing.assert_close(actions[~valid], torch.zeros((2, 3), dtype=torch.long))
+        log_prob = distribution.log_prob(actions.float())
+        entropy = distribution.entropy()
+        torch.testing.assert_close(log_prob[~valid], torch.zeros(2))
+        torch.testing.assert_close(entropy[~valid], torch.zeros(2))
+        ratio = (log_prob - log_prob.detach()).exp()
+        (-ratio[valid].mean() - .01 * entropy[valid].mean()).backward()
+        self.assertTrue(torch.isfinite(logits.grad).all())
+        self.assertEqual(torch.count_nonzero(logits.grad[~valid]).item(), 0)
+        self.assertTrue(torch.equal(masks, original))
+
+
 class NativeEntityTargetsTest(unittest.TestCase):
     def troop(self, identity, x=5000, y=10000):
         return replace(
