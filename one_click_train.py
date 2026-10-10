@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import socket
@@ -243,6 +244,22 @@ def validate_config(config):
         raise ValueError("rounds must be positive and battles must be between 1 and 16")
     if int(config["batch_size"]) <= 1 or int(config["checkpoint_every_rounds"]) <= 0:
         raise ValueError("batch_size must exceed one and checkpoint interval must be positive")
+    for key in ("rollout_decisions", "epochs_per_round", "decision_ticks"):
+        if int(config[key]) <= 0:
+            raise ValueError(f"{key} must be positive")
+    if int(config["decision_ticks"]) > 1_000_000:
+        raise ValueError("decision_ticks must not exceed 1,000,000")
+    if int(config["seed"]) < 0 or not 1 <= int(config["port"]) <= 65535:
+        raise ValueError("seed must be nonnegative and port must be between 1 and 65535")
+    for key in ("learning_rate", "gamma", "gae_lambda", "entropy_coef", "clip_range"):
+        if not math.isfinite(float(config[key])):
+            raise ValueError(f"{key} must be finite")
+    if float(config["learning_rate"]) <= 0 or float(config["clip_range"]) <= 0:
+        raise ValueError("learning_rate and clip_range must be positive")
+    if not 0 < float(config["gamma"]) <= 1 or not 0 <= float(config["gae_lambda"]) <= 1:
+        raise ValueError("gamma must be in (0, 1] and gae_lambda in [0, 1]")
+    if float(config["entropy_coef"]) < 0:
+        raise ValueError("entropy_coef must be nonnegative")
     if config.get("evaluation_port") is not None and not 1 <= int(config["evaluation_port"]) <= 65535:
         raise ValueError("evaluation_port must be between 1 and 65535")
     if int(config["rollout_decisions"]) % int(config["battles"]):
@@ -254,6 +271,14 @@ def validate_config(config):
         if full_buffer % int(config["batch_size"]):
             raise ValueError("PPO batch_size 必须能整除每轮决策总数")
     if config.get("self_play_enabled"):
+        for key in ("self_play_snapshot_every_rounds", "self_play_pool_size",
+                    "self_play_active_historical", "self_play_loaded_model_limit"):
+            if int(config[key]) <= 0:
+                raise ValueError(f"{key} must be positive")
+        for key in ("self_play_random_ratio", "self_play_current_ratio",
+                    "self_play_historical_ratio", "self_play_elo_k"):
+            if not math.isfinite(float(config[key])) or float(config[key]) < 0:
+                raise ValueError(f"{key} must be finite and nonnegative")
         ratio_sum = sum(float(config[key]) for key in (
             "self_play_random_ratio",
             "self_play_current_ratio",
@@ -262,23 +287,40 @@ def validate_config(config):
         if not abs(ratio_sum - 1.0) <= 1e-6:
             raise ValueError("随机、当前策略和历史快照的对手比例之和必须为 1")
     if config.get("recurrent_enabled"):
+        for key in ("tbptt_steps", "recurrent_hidden_size", "recurrent_layers"):
+            if int(config[key]) <= 0:
+                raise ValueError(f"{key} must be positive")
         rollout_steps = int(config["rollout_decisions"]) // int(config["battles"])
         if int(config["tbptt_steps"]) > rollout_steps:
             raise ValueError("TBPTT 序列长度不能超过每个环境的 rollout steps")
     if config.get("cross_modal_enabled"):
+        for key in ("cross_modal_dim", "cross_modal_heads", "cross_modal_entity_layers"):
+            if int(config[key]) <= 0:
+                raise ValueError(f"{key} must be positive")
         if int(config["cross_modal_dim"]) % int(config["cross_modal_heads"]):
             raise ValueError("Cross-attention token 维度必须能被头数整除")
     if config.get("spatial_heatmap_enabled"):
+        if int(config["spatial_feature_channels"]) <= 0:
+            raise ValueError("spatial_feature_channels must be positive")
         if int(config["spatial_feature_channels"]) % 8:
             raise ValueError("空间 feature channels 必须能被 8 整除")
     if config.get("world_model_enabled"):
-        if float(config["auxiliary_coef"]) < 0:
-            raise ValueError("辅助总损失系数不能为负数")
+        from native_engine.native_recurrent_model import NativeWorldModelPPO
+
+        if not math.isfinite(float(config["auxiliary_coef"])) or float(config["auxiliary_coef"]) < 0:
+            raise ValueError("辅助总损失系数必须有限且不能为负数")
+        if int(config["auxiliary_horizon"]) <= 0 or int(config["world_model_hidden_dim"]) <= 0:
+            raise ValueError("辅助预测跨度和 hidden dimension 必须为正数")
         if int(config["auxiliary_horizon"]) >= int(config["tbptt_steps"]):
             raise ValueError("未来局面预测步数必须小于 TBPTT 序列长度")
-        if any(float(value) < 0 for value in config["auxiliary_weights"].values()):
-            raise ValueError("辅助任务权重不能为负数")
+        if config["auxiliary_weights"].keys() - NativeWorldModelPPO.DEFAULT_AUXILIARY_WEIGHTS.keys():
+            raise ValueError("未知的辅助任务权重名称")
+        if any(not math.isfinite(float(value)) or float(value) < 0
+               for value in config["auxiliary_weights"].values()):
+            raise ValueError("辅助任务权重必须有限且不能为负数")
     if config.get("fixed_evaluation_enabled"):
+        if int(config["evaluation_seed_base"]) < 0:
+            raise ValueError("evaluation_seed_base must be nonnegative")
         if int(config["evaluation_every_rounds"]) <= 0:
             raise ValueError("固定评估间隔必须为正数")
         if int(config["evaluation_seed_count"]) <= 0:

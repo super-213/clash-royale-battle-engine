@@ -196,6 +196,12 @@ class TrainingExperimentsTest(unittest.TestCase):
             self.assertFalse(experiments.build_report(suite)["valid"])
             metadata_path = run_dir / "summary.json"
             metadata = json.loads(metadata_path.read_text())
+            original_sources = metadata["source_sha256"]
+            metadata["source_sha256"] = {}
+            metadata_path.write_text(json.dumps(metadata))
+            with self.assertRaisesRegex(ValueError, "training source"):
+                experiments.read_run_result(plan, plan["runs"][0])
+            metadata["source_sha256"] = original_sources
             metadata["timesteps"] += 8
             metadata_path.write_text(json.dumps(metadata))
             with self.assertRaisesRegex(ValueError, "unequal"):

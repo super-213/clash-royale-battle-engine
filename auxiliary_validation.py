@@ -129,9 +129,13 @@ def score_dataset(config, model, dataset, batch_size=64):
         # Collection-model hidden states are not portable between checkpoints.
         states = None
         prior_wave = None
-        groups = dict.fromkeys(zip(data['wave'].tolist(), data['decision'].tolist()))
-        for wave, decision in groups:
-            batch = np.flatnonzero((data['wave'] == wave) & (data['decision'] == decision))
+        # Index rows once. Scanning all N rows for each decision is quadratic
+        # in trajectory length, even though recurrent replay itself is linear.
+        groups = {}
+        for index, key in enumerate(zip(data['wave'].tolist(), data['decision'].tolist())):
+            groups.setdefault(key, []).append(index)
+        for (wave, decision), indices in groups.items():
+            batch = np.asarray(indices)
             if wave != prior_wave:
                 lstm = model.policy.lstm_actor
                 states = tuple(torch.zeros(lstm.num_layers, len(batch), lstm.hidden_size,
@@ -168,6 +172,7 @@ def score_dataset(config, model, dataset, batch_size=64):
     actual_death = targets[..., 0] > .5
     next_targets = belief[:, 8:16]
     next_valid = next_targets.sum(-1) > 0
+    hand_valid = belief[:, :8].sum(-1) > 0
     metrics = {
         'tower_delta_mae': mean((pred['tower_delta'] - transition[:, :2]).abs().mean(-1), transition[:, 7] > .5),
         'damage_result_accuracy': mean((pred['damage_source'].argmax(-1) == transition[:, 2:7].argmax(-1)).float(), transition[:, 7] > .5),
@@ -176,7 +181,7 @@ def score_dataset(config, model, dataset, batch_size=64):
         'entity_position_delta_mae': mean((pred['entity_position_delta'] - targets[..., 1:3]).abs().mean(-1), survivor),
         'future_scene_mae': mean((pred['future_value'] - future[:, 0]).abs(), future[:, 1] > .5),
         'public_elixir_bin_accuracy': mean((pred['opponent_elixir'].argmax(-1) == (scalar[:, 1]*5).long().clamp(0, 4)).float()),
-        'public_hand_belief_bce': mean(F.binary_cross_entropy_with_logits(pred['opponent_hand'], belief[:, :8], reduction='none')),
+        'public_hand_belief_bce': mean(F.binary_cross_entropy_with_logits(pred['opponent_hand'], belief[:, :8], reduction='none').mean(-1), hand_valid),
         'public_next_card_cross_entropy': mean(-(next_targets * F.log_softmax(pred['opponent_next_card'], -1)).sum(-1), next_valid),
         'entity_labels': int(valid.sum()), 'surviving_entity_labels': int(survivor.sum()),
         'future_labels': int((future[:, 1] > .5).sum()),
@@ -185,7 +190,7 @@ def score_dataset(config, model, dataset, batch_size=64):
     for role in (0, 1):
         selected = torch.tensor(data['role'] == role)
         by_role[f'p{role}'] = {'samples': int(selected.sum()),
-                              'tower_delta_mae': mean((pred['tower_delta'] - transition[:, :2]).abs().mean(-1), selected)}
+                              'tower_delta_mae': mean((pred['tower_delta'] - transition[:, :2]).abs().mean(-1), selected & (transition[:, 7] > .5))}
     return {'dataset': metadata, 'dataset_sha256': _sha256(dataset), 'metrics': metrics, 'by_role': by_role,
             'inference_only': True, 'training_updates': 0}
 

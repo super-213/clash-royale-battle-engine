@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from stable_baselines3.common.callbacks import BaseCallback
-from fixed_evaluation import preserve_random_state
+from training_runtime import load_inference_model
 
 
 def _timestamp():
@@ -239,8 +239,7 @@ class SelfPlayOpponentPool:
             self._loaded_models[snapshot_id] = model
             return model
         entry = self._snapshot_entry(snapshot_id)
-        with preserve_random_state():
-            model = self.algorithm_class.load(entry["path"], device=self.device)
+        model = load_inference_model(self.algorithm_class, entry["path"], self.device)
         self._loaded_models[snapshot_id] = model
         while len(self._loaded_models) > self.loaded_model_limit:
             removable = next(

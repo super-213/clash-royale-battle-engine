@@ -18,8 +18,10 @@ from native_engine.native_recurrent_model import (
     NativeActionConditionedWorldModelPPO, EntityTargetRecurrentDictRolloutBuffer, RNNStates,
 )
 from native_engine.native_vec_env import native_observation_space, ENTITY_TARGET_SCHEMA, TRANSITION_TARGET_SCHEMA
+from native_engine.native_vec_env import CARD_IDS, _cycle_belief
 from types import SimpleNamespace
-from training_runtime import run_sb3_training, resume_directory
+from training_runtime import run_sb3_training, resume_directory, load_inference_model
+from one_click_train import validate_config
 from self_play import SelfPlayOpponentPool
 from auxiliary_validation import collect_dataset, score_dataset
 from native_visualizer import record_replay, write_replay
@@ -41,6 +43,133 @@ class TrainingFixesTest(unittest.TestCase):
         with patch('native_engine.native_vec_env.Batch', side_effect=lambda **kw: TerminalBatch(kw['battles'])):
             result = run_sb3_training(config, root)
         return result
+
+    def test_inference_loading_preserves_recurrent_predictions_without_training_buffers(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.train(root)
+            path = root / 'final_model.zip'
+            original = NativeActionConditionedWorldModelPPO.load(path, device='cpu')
+            light = load_inference_model(NativeActionConditionedWorldModelPPO, path, 'cpu')
+            self.assertEqual(light.n_steps, 1)
+            self.assertIsNone(light.rollout_buffer)
+            self.assertFalse(light.policy.optimizer.state)
+            self.assertTrue(original.policy.optimizer.state)
+            env = NativeBatchVecEnv(battles=2, batch_factory=lambda **kw: FakeBatch(2))
+            try:
+                observation = env.reset()
+                original_state = light_state = None
+                for starts in ([True, True], [False, False], [False, True]):
+                    expected, original_state = original.predict(observation, state=original_state,
+                        episode_start=np.asarray(starts), deterministic=True)
+                    actual, light_state = light.predict(observation, state=light_state,
+                        episode_start=np.asarray(starts), deterministic=True)
+                    np.testing.assert_array_equal(actual, expected)
+                    for left, right in zip(original_state, light_state):
+                        np.testing.assert_allclose(left, right)
+                env.opponent_policy = light
+                env.reset()
+                recorded = []
+                predict = light.predict
+                def capture(*args, **kwargs):
+                    recorded.append((kwargs['state'], kwargs['episode_start'].copy()))
+                    return predict(*args, **kwargs)
+                with patch.object(light, 'predict', side_effect=capture):
+                    env.step(np.zeros((2, 3), dtype=np.int64))
+                    env.batch.finish_slot_zero = True
+                    env.step(np.zeros((2, 3), dtype=np.int64))
+                    env.step(np.zeros((2, 3), dtype=np.int64))
+                self.assertIsNone(recorded[0][0])
+                self.assertIsNotNone(recorded[1][0])
+                np.testing.assert_array_equal(recorded[0][1], [True, True])
+                np.testing.assert_array_equal(recorded[1][1], [False, False])
+                np.testing.assert_array_equal(recorded[2][1], [True, False])
+            finally:
+                env.close()
+
+    def test_incremental_cycle_beliefs_equal_complete_history_reconstruction(self):
+        env = NativeBatchVecEnv(battles=1, batch_factory=lambda **kw: FakeBatch(1))
+        try:
+            env.reset()
+            slot = env.slots[0]
+            sequences = [[], []]
+            # Include both viewpoints, long histories and an impossible cycle.
+            for index, card in enumerate((*CARD_IDS, *CARD_IDS, CARD_IDS[-1])):
+                for owner in (0, 1):
+                    sequences[owner].append(card)
+                    event = SimpleNamespace(tick=91 + index, owner=owner, card=card, cost=1)
+                    env._record_plays(slot, SimpleNamespace(plays=(event,)), (), ())
+                    expected = _cycle_belief(tuple(sequences[owner]))
+                    for actual, reference in zip(slot.cycle_beliefs[owner], expected):
+                        np.testing.assert_allclose(actual, reference)
+                    observation = env._observation(slot, owner=1-owner)
+                    np.testing.assert_allclose(observation['public_belief'][:16], (*expected[0], *expected[1]))
+            env.reset()
+            self.assertEqual(slot.cycle_beliefs, [_cycle_belief(())] * 2)
+        finally:
+            env.close()
+
+    def test_configuration_rejects_invalid_values_before_training(self):
+        for key, value in (
+            ('rollout_decisions', 0), ('epochs_per_round', 0), ('decision_ticks', 0),
+            ('decision_ticks', 1_000_001), ('port', 0), ('seed', -1),
+            ('learning_rate', float('nan')), ('gamma', 1.1), ('gae_lambda', -1),
+            ('entropy_coef', float('inf')), ('tbptt_steps', 0),
+            ('cross_modal_heads', 0), ('cross_modal_entity_layers', 0),
+            ('spatial_feature_channels', 0), ('auxiliary_horizon', 0),
+            ('world_model_hidden_dim', 0), ('auxiliary_coef', float('nan')),
+            ('auxiliary_weights', {'entity_death': float('inf')}),
+            ('auxiliary_weights', {'typo': 1}),
+        ):
+            config = self.config()
+            config[key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                validate_config(config)
+        config = self.config()
+        config.update(self_play_enabled=True, self_play_random_ratio=-.1,
+                      self_play_current_ratio=.4, self_play_historical_ratio=.7)
+        with self.assertRaises(ValueError):
+            validate_config(config)
+
+    def test_model_construction_failure_closes_environment(self):
+        env = NativeBatchVecEnv(battles=2, batch_factory=lambda **kw: FakeBatch(2))
+        with TemporaryDirectory() as directory:
+            import training_runtime
+            actual_load = training_runtime.load_object
+            def load(reference):
+                if reference == self.config()['environment']:
+                    return lambda **kwargs: env
+                if reference == self.config()['algorithm']:
+                    def fail(*args, **kwargs):
+                        raise RuntimeError('model construction failed')
+                    return fail
+                return actual_load(reference)
+            with patch('training_runtime.load_object', side_effect=load):
+                with self.assertRaisesRegex(RuntimeError, 'model construction failed'):
+                    run_sb3_training(self.config(), directory)
+        self.assertTrue(env.closed)
+
+    def test_source_changes_during_training_invalidate_the_run(self):
+        from training_experiments import source_hashes
+
+        sources = source_hashes()
+        self.assertIn('requirements-training.txt', sources)
+        self.assertIn('vendor/firstlight/probe/minimal_capture.inc', sources)
+        with TemporaryDirectory() as directory:
+            with patch('training_experiments.source_hashes', side_effect=[sources, {}]):
+                with self.assertRaisesRegex(ValueError, 'source changed'):
+                    self.train(directory)
+            summary = json.loads((Path(directory) / 'summary.json').read_text())
+            self.assertEqual(summary['status'], 'interrupted')
+            self.assertEqual(summary['source_sha256'], sources)
+
+    def test_singleton_final_minibatch_keeps_parameters_finite(self):
+        with TemporaryDirectory() as directory:
+            config = self.config()
+            config.update(rounds=1, batch_size=7)
+            self.train(directory, config)
+            model = NativeActionConditionedWorldModelPPO.load(Path(directory) / 'final_model.zip', device='cpu')
+            self.assertTrue(all(torch.isfinite(value).all() for value in model.policy.parameters()))
 
     def test_historical_checkpoint_loading_preserves_real_rng_streams(self):
         with TemporaryDirectory() as directory:
@@ -116,8 +245,21 @@ class TrainingFixesTest(unittest.TestCase):
         total, losses = model._auxiliary_losses(samples, predictions)
         self.assertAlmostEqual(float(losses['tower_delta'].detach()), .5)
         self.assertAlmostEqual(float(losses['entity_death']), np.log(2), places=6)
+        self.assertEqual(float(losses['opponent_hand']), 0)
+        self.assertEqual(float(losses['opponent_next_card']), 0)
+        # One real posterior and one empty posterior: invalid rows neither
+        # contribute negative-card labels nor dilute the valid loss.
+        observation['public_belief'][1, :8] = .5
+        observation['public_belief'][1, 8:16] = 1 / 8
+        predictions['opponent_hand'].requires_grad_()
+        predictions['opponent_next_card'].requires_grad_()
+        total, losses = model._auxiliary_losses(samples, predictions)
+        self.assertAlmostEqual(float(losses['opponent_hand'].detach()), np.log(2), places=6)
+        self.assertAlmostEqual(float(losses['opponent_next_card'].detach()), np.log(8), places=6)
         total.backward()
         self.assertGreater(float(predictions['tower_delta'].grad[1].abs().sum()), 0)
+        self.assertEqual(float(predictions['opponent_hand'].grad[0].abs().sum()), 0)
+        self.assertEqual(float(predictions['opponent_next_card'].grad[0].abs().sum()), 0)
 
     def test_future_targets_cross_tbptt_but_never_episodes(self):
         env = NativeBatchVecEnv(battles=1)

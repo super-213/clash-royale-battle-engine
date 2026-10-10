@@ -273,6 +273,9 @@ class NativeRecurrentPPO(RecurrentPPO):
 
     def _setup_model(self):
         super()._setup_model()
+        # The parent allocates a standard recurrent buffer. Release it before
+        # constructing our replacement, instead of retaining both allocations.
+        self.rollout_buffer = None
         lstm = self.policy.lstm_actor
         hidden_shape = (
             self.n_steps,
@@ -335,17 +338,19 @@ class NativeWorldModelPPO(NativeRecurrentPPO):
     ):
         self.auxiliary_coef = float(auxiliary_coef)
         self.auxiliary_horizon = int(auxiliary_horizon)
-        if self.auxiliary_coef < 0:
-            raise ValueError("auxiliary_coef must be non-negative")
+        if not np.isfinite(self.auxiliary_coef) or self.auxiliary_coef < 0:
+            raise ValueError("auxiliary_coef must be finite and non-negative")
         if self.auxiliary_horizon <= 0:
             raise ValueError("auxiliary_horizon must be positive")
         self.auxiliary_weights = dict(self.DEFAULT_AUXILIARY_WEIGHTS)
         if auxiliary_weights:
+            if auxiliary_weights.keys() - self.DEFAULT_AUXILIARY_WEIGHTS.keys():
+                raise ValueError("unknown auxiliary task weight")
             self.auxiliary_weights.update({
                 key: float(value) for key, value in auxiliary_weights.items()
             })
-        if any(value < 0 for value in self.auxiliary_weights.values()):
-            raise ValueError("auxiliary task weights must be non-negative")
+        if any(not np.isfinite(value) or value < 0 for value in self.auxiliary_weights.values()):
+            raise ValueError("auxiliary task weights must be finite and non-negative")
         super().__init__(*args, **kwargs)
         if self.auxiliary_horizon >= self.tbptt_steps:
             raise ValueError(
@@ -416,11 +421,15 @@ class NativeWorldModelPPO(NativeRecurrentPPO):
         losses["opponent_elixir"] = masked_mean(elixir_error, valid)
 
         belief = observations["public_belief"]
+        # An empty rule-consistent posterior is unavailable supervision, not
+        # evidence that all eight cards are absent from the opponent's hand.
+        belief_valid = valid & (belief[..., :8].sum(dim=-1) > 0)
         hand_error = functional.binary_cross_entropy_with_logits(
             predicted["opponent_hand"], belief[..., :8], reduction="none"
         ).mean(dim=-1)
-        losses["opponent_hand"] = masked_mean(hand_error, valid)
+        losses["opponent_hand"] = masked_mean(hand_error, belief_valid)
         next_card_targets = belief[..., 8:16]
+        next_valid = valid & (next_card_targets.sum(dim=-1) > 0)
         next_card_targets = next_card_targets / next_card_targets.sum(
             dim=-1, keepdim=True
         ).clamp_min(1e-6)
@@ -430,7 +439,7 @@ class NativeWorldModelPPO(NativeRecurrentPPO):
                 predicted["opponent_next_card"], dim=-1
             )
         ).sum(dim=-1)
-        losses["opponent_next_card"] = masked_mean(next_card_error, valid)
+        losses["opponent_next_card"] = masked_mean(next_card_error, next_valid)
 
         future = self._sequences(rollout_data.future_targets, sequence_count)
         future_error = functional.smooth_l1_loss(
@@ -486,7 +495,9 @@ class NativeWorldModelPPO(NativeRecurrentPPO):
                 )
                 values = values.flatten()
                 advantages = rollout_data.advantages
-                if self.normalize_advantage:
+                # Direct Python callers may use a minibatch size that leaves
+                # one sample. Unbiased std on that singleton is NaN.
+                if self.normalize_advantage and advantages[mask].numel() > 1:
                     advantages = (
                         advantages - advantages[mask].mean()
                     ) / (advantages[mask].std() + 1e-8)

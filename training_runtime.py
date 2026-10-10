@@ -15,6 +15,7 @@ import shutil
 import sys
 import time
 from collections import deque
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
@@ -179,6 +180,25 @@ def load_object(reference):
         return getattr(module, attribute_name)
     except AttributeError as error:
         raise ImportError(f"{reference!r} does not exist") from error
+
+
+def load_inference_model(algorithm_class, checkpoint, device):
+    """Load a prediction-only model without retaining its training rollout.
+
+    SB3 reconstructs rollout buffers on load even without an environment. A
+    historical opponent needs neither a full rollout nor the saved optimizer
+    moments. Resuming training must use the ordinary algorithm.load instead.
+    """
+    from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
+    from fixed_evaluation import preserve_random_state
+
+    kwargs = {"n_steps": 1} if issubclass(algorithm_class, OnPolicyAlgorithm) else {}
+    with preserve_random_state():
+        model = algorithm_class.load(checkpoint, device=device, **kwargs)
+    if isinstance(model, OnPolicyAlgorithm):
+        model.rollout_buffer = None
+        model.policy.optimizer.state.clear()
+    return model
 
 
 def require_training_device(device):
@@ -547,7 +567,7 @@ def _sha256(path):
     return digest.hexdigest()
 
 
-def _model_metadata(model, model_path, config, elapsed, telemetry, status):
+def _model_metadata(model, model_path, config, elapsed, telemetry, status, source_sha256=None):
     parameter_count = sum(parameter.numel() for parameter in model.policy.parameters())
     trainable_count = sum(
         parameter.numel() for parameter in model.policy.parameters() if parameter.requires_grad
@@ -574,6 +594,7 @@ def _model_metadata(model, model_path, config, elapsed, telemetry, status):
         "model_file": str(model_path),
         "model_bytes": model_path.stat().st_size,
         "model_sha256": _sha256(model_path),
+        "source_sha256": source_sha256,
         "host": {
             "platform": platform.platform(),
             "machine": platform.machine(),
@@ -787,9 +808,20 @@ def _write_summary_markdown(path, metadata, run_dir):
 
 def run_sb3_training(config, run_dir):
     """Train an SB3 algorithm from an external JSON profile."""
+    # Model loading, logger creation and callback construction can all fail
+    # before learn(). Own resources from the moment they are constructed.
+    with ExitStack() as resources:
+        return _run_sb3_training(config, run_dir, resources)
+
+
+def _run_sb3_training(config, run_dir, resources):
+    from training_experiments import source_hashes
+
     config = dict(config)
     run_dir = Path(run_dir).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
+    source_at_start = source_hashes()
+    _atomic_json(run_dir / "source_sha256.json", source_at_start)
     device = require_training_device(config["device"])
     battles = int(config["battles"])
     rollout_decisions = int(config["rollout_decisions"])
@@ -830,6 +862,7 @@ def run_sb3_training(config, run_dir):
     if self_play_pool is not None:
         env_kwargs["opponent_policy"] = self_play_pool
     env = VecMonitor(env_class(**env_kwargs), filename=str(run_dir / "episodes"))
+    resources.callback(env.close)
     checkpoint = UpdatedCheckpointCallback(run_dir, config, self_play_pool)
     algorithm_kwargs = dict(config.get("algorithm_kwargs", {}))
     if config.get("recurrent_enabled", False):
@@ -895,7 +928,6 @@ def run_sb3_training(config, run_dir):
             if key in allowed_changes:
                 continue
             if config.get(key) != saved_config.get(key):
-                env.close()
                 raise ValueError(f"resume configuration changed: {key}")
         model = algorithm_class.load(resume_from, env=env, device=device)
     else:
@@ -903,9 +935,9 @@ def run_sb3_training(config, run_dir):
     initial_timesteps = model.num_timesteps
     remaining_timesteps = total_timesteps - initial_timesteps
     if remaining_timesteps <= 0:
-        env.close()
         raise ValueError("target rounds must exceed completed checkpoint rounds")
     model.set_logger(configure(str(run_dir / "sb3"), ["stdout", "csv", "tensorboard"]))
+    resources.callback(model.logger.close)
     callbacks = [checkpoint]
     if self_play_pool is not None:
         self_play_pool.set_current_model(model)
@@ -975,12 +1007,7 @@ def run_sb3_training(config, run_dir):
     callbacks.append(telemetry)
     checkpoint.telemetry = telemetry
     if resume_from:
-        try:
-            restore_resume_state(resume_from, env, self_play_pool, telemetry)
-        except BaseException:
-            env.close()
-            model.logger.close()
-            raise
+        restore_resume_state(resume_from, env, self_play_pool, telemetry)
         if self_play_callback is not None:
             self_play_callback.saved_rounds.update(entry["round"] for entry in self_play_pool.snapshots)
     started = time.monotonic()
@@ -998,12 +1025,14 @@ def run_sb3_training(config, run_dir):
             progress_bar=False,
             log_interval=1,
         )
+        if source_hashes() != source_at_start:
+            raise ValueError("training source changed during this run; use a fresh run")
         model.save(model_path.with_suffix(""))
         save_resume_state(model_path, model, config, self_play_pool, telemetry)
         elapsed = time.monotonic() - started
         generate_charts(run_dir, telemetry.records)
         metadata = _model_metadata(
-            model, model_path, config, elapsed, telemetry, status="completed"
+            model, model_path, config, elapsed, telemetry, status="completed", source_sha256=source_at_start
         )
         if self_play_pool is not None:
             metadata["self_play"] = self_play_pool.summary()
@@ -1041,7 +1070,7 @@ def run_sb3_training(config, run_dir):
                 save_resume_state(interrupted_path, model, config, self_play_pool, telemetry)
             generate_charts(run_dir, telemetry.records)
             metadata = _model_metadata(
-                model, interrupted_path, config, elapsed, telemetry, status="interrupted"
+                model, interrupted_path, config, elapsed, telemetry, status="interrupted", source_sha256=source_at_start
             )
             if self_play_pool is not None:
                 metadata["self_play"] = self_play_pool.summary()
@@ -1062,6 +1091,3 @@ def run_sb3_training(config, run_dir):
                 flush=True,
             )
         raise
-    finally:
-        env.close()
-        model.logger.close()

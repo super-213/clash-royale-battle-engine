@@ -27,6 +27,7 @@ from typing import Any, Callable, Sequence
 
 from gymnasium import spaces
 import numpy as np
+from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.vec_env import VecEnv
 
 from .batch import Batch
@@ -160,6 +161,8 @@ class _Slot:
     initial_towers: tuple[Any, ...] = ()
     history: list[_HistoryEvent] = field(default_factory=list)
     ledger: list[_HistoryEvent] = field(default_factory=list)
+    cycle_states: list[dict] = field(default_factory=list)
+    cycle_beliefs: list[tuple] = field(default_factory=list)
 
 
 def _selected(indices, count):
@@ -306,23 +309,20 @@ def _regenerated_elixir(start_seconds, end_seconds):
     return regenerated
 
 
-@lru_cache(maxsize=8192)
-def _cycle_belief(plays):
-    """Enumerate public cycle states without using the native hidden hand."""
-    states = {state: 1 for state in _INITIAL_CYCLE_STATES}
-    for card in plays:
-        transitioned = {}
-        for (hand, queue), weight in states.items():
-            if card not in hand:
-                continue
-            next_state = (
-                frozenset((*hand.difference((card,)), queue[0])),
-                (*queue[1:], card),
-            )
-            transitioned[next_state] = transitioned.get(next_state, 0) + weight
-        states = transitioned
-        if not states:
-            break
+def _advance_cycle_states(states, card):
+    transitioned = {}
+    for (hand, queue), weight in states.items():
+        if card not in hand:
+            continue
+        next_state = (
+            frozenset((*hand.difference((card,)), queue[0])),
+            (*queue[1:], card),
+        )
+        transitioned[next_state] = transitioned.get(next_state, 0) + weight
+    return transitioned
+
+
+def _cycle_summary(states):
     hand_belief = np.zeros(len(CARD_IDS), dtype=np.float32)
     next_belief = np.zeros(len(CARD_IDS), dtype=np.float32)
     total = float(sum(states.values()))
@@ -336,6 +336,17 @@ def _cycle_belief(plays):
         np.log(max(len(states), 1)) / np.log(len(_INITIAL_CYCLE_STATES))
     )
     return tuple(hand_belief), tuple(next_belief), float(confidence)
+
+
+@lru_cache(maxsize=8192)
+def _cycle_belief(plays):
+    """Reference reconstruction from a complete public play sequence."""
+    states = {state: 1 for state in _INITIAL_CYCLE_STATES}
+    for card in plays:
+        states = _advance_cycle_states(states, card)
+        if not states:
+            break
+    return _cycle_summary(states)
 
 
 class NativeBatchVecEnv(VecEnv):
@@ -363,13 +374,15 @@ class NativeBatchVecEnv(VecEnv):
     ):
         if not 1 <= int(battles) <= 16:
             raise ValueError("battles must be between 1 and 16")
-        if int(decision_ticks) <= 0:
-            raise ValueError("decision_ticks must be positive")
+        if not 1 <= int(decision_ticks) <= 1_000_000:
+            raise ValueError("decision_ticks must be between 1 and 1,000,000")
         self.battles = int(battles)
         self.port = int(port)
         self.decision_ticks = int(decision_ticks)
         self.base_seed = int(seed)
         self.opponent_policy = opponent_policy
+        self._opponent_state = None
+        self._opponent_episode_starts = np.ones(self.battles, dtype=bool)
         self._batch_factory = batch_factory or Batch
         self.batch = None
         self.waiting = False
@@ -450,8 +463,11 @@ class NativeBatchVecEnv(VecEnv):
         slot.learner_owner = self._role_for(slot)
         slot.state = state
         slot.previous_state = None
+        self._opponent_episode_starts[slot.index] = True
         slot.history.clear()
         slot.ledger.clear()
+        slot.cycle_states = [dict.fromkeys(_INITIAL_CYCLE_STATES, 1) for _ in range(2)]
+        slot.cycle_beliefs = [_cycle_belief(()) for _ in range(2)]
         slot.initial_tower_hp = tuple(
             max(_tower_hp(state, owner), 1.0) for owner in (0, 1)
         )
@@ -644,7 +660,18 @@ class NativeBatchVecEnv(VecEnv):
                 key: np.stack([observation[key] for observation in observations])
                 for key in self.observation_space.spaces
             }
-            actions = np.asarray(policy.predict(batched, deterministic=False)[0])
+            if isinstance(policy, BaseAlgorithm):
+                # A directly supplied recurrent SB3 model needs the same
+                # per-slot memory/reset contract as our league wrappers.
+                actions, self._opponent_state = policy.predict(
+                    batched, state=self._opponent_state,
+                    episode_start=self._opponent_episode_starts,
+                    deterministic=False,
+                )
+                self._opponent_episode_starts[:] = False
+                actions = np.asarray(actions)
+            else:
+                actions = np.asarray(policy.predict(batched, deterministic=False)[0])
             if actions.shape != (self.battles, 3):
                 raise ValueError(
                     "opponent policy must return actions with shape "
@@ -693,6 +720,9 @@ class NativeBatchVecEnv(VecEnv):
             )
             slot.history.append(recorded)
             slot.ledger.append(recorded)
+            owner = recorded.owner
+            slot.cycle_states[owner] = _advance_cycle_states(slot.cycle_states[owner], recorded.card)
+            slot.cycle_beliefs[owner] = _cycle_summary(slot.cycle_states[owner])
         del slot.history[:-HISTORY_LENGTH]
 
     def _reward(self, slot, before, after, invalid):
@@ -946,7 +976,9 @@ class NativeBatchVecEnv(VecEnv):
         opponent_plays = tuple(
             event.card for event in slot.ledger if event.owner == enemy
         )
-        hand_belief, next_belief, confidence = _cycle_belief(opponent_plays)
+        # Update once per public event; do not replay the entire match's card
+        # sequence on every learner/opponent observation.
+        hand_belief, next_belief, confidence = slot.cycle_beliefs[enemy]
         last_play_ages = []
         for physical_owner in (owner, enemy):
             last_tick = next((

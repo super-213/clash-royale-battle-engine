@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
 import math
 import random
@@ -42,7 +41,9 @@ EVALUATION_COLUMNS = (
 
 def checkpoint_spec(path, algorithm, expected_sha256=None):
     path = Path(path).resolve()
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    from training_runtime import _sha256
+
+    digest = _sha256(path)
     if expected_sha256 is not None and digest != expected_sha256:
         raise ValueError(f"checkpoint hash changed: {path}")
     return {"path": str(path), "algorithm": str(algorithm), "sha256": digest}
@@ -381,24 +382,24 @@ class FixedEvaluationCallback(BaseCallback):
         }
 
     def _opponent(self, opponent_id, battles):
+        from training_runtime import load_object, load_inference_model
+
         if opponent_id == "random":
             return None
         if opponent_id in self.frozen_opponents:
-            from training_runtime import load_object
-
             spec = self.frozen_opponents[opponent_id]
             checkpoint_spec(spec["path"], spec["algorithm"], spec["sha256"])
             if opponent_id not in self._frozen_models:
-                self._frozen_models[opponent_id] = load_object(spec["algorithm"]).load(
-                    spec["path"], device=self.device
+                self._frozen_models[opponent_id] = load_inference_model(
+                    load_object(spec["algorithm"]), spec["path"], self.device
                 )
             return FixedPolicyOpponent(self._frozen_models[opponent_id], battles, opponent_id)
         if opponent_id != "initial_policy":
             raise ValueError(f"unknown fixed evaluation opponent {opponent_id!r}")
         if self._initial_model is None:
             checkpoint_spec(self.initial_policy_path, self._initial_spec["algorithm"], self._initial_spec["sha256"])
-            self._initial_model = self.algorithm_class.load(
-                self.initial_policy_path, device=self.device
+            self._initial_model = load_inference_model(
+                self.algorithm_class, self.initial_policy_path, self.device
             )
         return FixedPolicyOpponent(
             self._initial_model, battles, opponent_id=opponent_id
@@ -651,6 +652,8 @@ class FixedEvaluationCallback(BaseCallback):
         return True
 
     def _on_training_end(self):
+        from training_runtime import load_inference_model
+
         completed = int(self.num_timesteps // self.rollout_decisions)
         self._schedule(completed)
         if self.deferred:
@@ -664,7 +667,7 @@ class FixedEvaluationCallback(BaseCallback):
             try:
                 with preserve_random_state():
                     for round_number, checkpoint in sorted(self.pending_checkpoints.items()):
-                        self.model = self.algorithm_class.load(checkpoint, device=self.device)
+                        self.model = load_inference_model(self.algorithm_class, checkpoint, self.device)
                         self.num_timesteps = self.model.num_timesteps
                         self.evaluate(round_number)
             finally:
@@ -673,14 +676,14 @@ class FixedEvaluationCallback(BaseCallback):
 
 def evaluate_checkpoint(config, checkpoint, output_dir):
     """Re-evaluate a saved model without collecting PPO data or updating weights."""
-    from training_runtime import load_object
+    from training_runtime import load_object, load_inference_model
 
     output_dir = Path(output_dir).resolve()
     if (output_dir / "evaluation").exists():
         raise ValueError("use a fresh output directory for checkpoint evaluation")
     algorithm = load_object(config["algorithm"])
     with preserve_random_state():
-        model = algorithm.load(checkpoint, device=config["device"])
+        model = load_inference_model(algorithm, checkpoint, config["device"])
         env_kwargs = dict(config.get("environment_kwargs", {}))
         env_kwargs.update(port=int(config["port"]), decision_ticks=int(config["decision_ticks"]))
         callback = FixedEvaluationCallback(

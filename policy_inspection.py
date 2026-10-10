@@ -1,8 +1,7 @@
 """Shared checkpoint loading for offline inspection and validation tools."""
 from pathlib import Path
 import json
-from training_runtime import load_object, resume_directory, require_training_device
-from fixed_evaluation import preserve_random_state
+from training_runtime import load_object, load_inference_model, resume_directory, require_training_device
 
 
 def checkpoint_config(checkpoint, config_path=None):
@@ -18,7 +17,6 @@ def checkpoint_config(checkpoint, config_path=None):
 
 def load_policy(checkpoint, config, device=None):
     device = require_training_device(device or config['device'])
-    with preserve_random_state():
-        model = load_object(config['algorithm']).load(checkpoint, device=device)
+    model = load_inference_model(load_object(config['algorithm']), checkpoint, device)
     model.policy.set_training_mode(False)
     return model

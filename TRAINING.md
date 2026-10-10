@@ -291,6 +291,13 @@ conda run -n clash-royale python train_native.py --rounds 10 --output artifacts/
 不恢复 resident 内部战斗、正在进行的对手分配和对局循环状态，因此不保证逐步轨迹相同。
 核心训练配置必须一致，可更改累计轮数、设备、端口和新运行目录。
 
+历史对手、固定评估和离线检查使用 `load_inference_model`，加载后释放训练 rollout
+缓冲区和优化器状态；该对象仅用于推理。续训使用标准 `algorithm.load`，保留完整优化器。
+每次运行记录 `source_sha256.json`，并在 `summary.json` 中保存启动时的源码哈希；
+训练期间源码发生变化会使运行失效。正式实验汇总同时核验其与计划一致，哈希范围包括
+Python、训练配置、依赖约束和原生 probe 源码。已有旧计划应保留历史记录，使用修复后
+源码重新生成计划；当前计划为 `artifacts/experiments/20261010_static_review/plan.json`。
+
 中断后的 `interrupted_model.zip` 是尽力保存的权重，可能处于采样或优化中间；恢复时
 优先使用最近一个完整的 `checkpoints/*.zip` 及其状态目录。最终轮在固定评估之前额外
 保存，评估失败也保留完整的训练检查点。

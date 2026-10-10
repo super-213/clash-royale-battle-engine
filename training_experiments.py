@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import copy
 import csv
-import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -14,7 +13,7 @@ import numpy as np
 
 from fixed_evaluation import checkpoint_spec, evaluate_checkpoint
 from one_click_train import load_profiles, prepare_config, validate_config
-from training_runtime import _atomic_json, load_object, utc_now
+from training_runtime import _atomic_json, _sha256, load_object, utc_now
 
 
 TASKS = (
@@ -29,8 +28,11 @@ METRICS = ("win_rate", "score_rate", "mean_crown_diff", "mean_tower_hp_diff", "i
 def source_hashes():
     root = Path(__file__).resolve().parent
     paths = [*root.glob("*.py"), *root.glob("native_engine/*.py"),
-             *root.glob("training_profiles/*.json"), root / "standard_match.json"]
-    return {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+             *root.glob("training_profiles/*.json"), root / "standard_match.json",
+             root / "requirements-training.txt",
+             *(path for path in (root / "vendor/firstlight/probe").iterdir()
+               if path.suffix in {".cpp", ".h", ".inc", ".S"} and not path.name.startswith("test_"))]
+    return {str(path.relative_to(root)): _sha256(path)
             for path in sorted(paths)}
 
 
@@ -179,6 +181,8 @@ def read_run_result(plan, run):
     if json.loads((root / "config.json").read_text()) != config:
         raise ValueError(f"config changed after planning: {root}")
     metadata = json.loads((root / "summary.json").read_text())
+    if metadata.get("source_sha256") != plan["source_sha256"]:
+        raise ValueError(f"training source does not match the experiment plan: {root}")
     if metadata["status"] != "completed" or metadata["timesteps"] != plan["total_decisions_per_run"]:
         raise ValueError(f"incomplete or unequal training budget: {root}")
     checkpoint_spec(root / "final_model.zip", config["algorithm"], metadata["model_sha256"])

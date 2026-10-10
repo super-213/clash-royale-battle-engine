@@ -1,7 +1,7 @@
 {
   "prepared_date": "2026-10-10",
   "timezone": "Asia/Shanghai",
-  "git_head": "a25e0e0e123e3d421081e03a023d6322f09dd3f9",
+  "git_head": "edc58b56927b99fea265e8ad56b841d579d1f7b9",
   "paper_scope": "Methods and experiment design only; no empirical battle results",
   "architecture": "action_conditioned_world_model_stateful_v6",
   "verification_environment": {
@@ -38,34 +38,37 @@
       "random",
       "legacy_v5"
     ],
-    "path": "artifacts/experiments/20261010_mirror_v6_fixes/plan.json",
-    "status": "planned; formal native runs not executed"
+    "path": "artifacts/experiments/20261010_static_review/plan.json",
+    "status": "planned after static review; formal native runs not executed"
   },
   "source_sha256": {
-    "native_vec_env.py": "c4d00aca718a7b96988b5d028e05526d2242b4a8643e0f895e9fc9fc46a10ff4",
+    "native_vec_env.py": "25c031c2d6bbb9c71695349b3af0cbca46f76369a6f4a85f719ab66bab84004b",
     "native_model.py": "d9ab62a8fcca9133266a54b351dc333406a0d693a60810d8939046c37aa26ffe",
     "native_cross_modal.py": "2f21ce3da7f80a6bcca4bd3ede5f75dadcedc8d9fd6945009dd2d57f8b61db1d",
     "native_spatial_model.py": "a3320bb6b2e7b6cb91856c2fd3db56f9470f18924f7bd2925d772f89dfb9ae48",
     "native_world_model.py": "fb84cc8d4c77ca13841ba1b41af7d5082526bba8d8987c7710f8c47cccfd01e7",
-    "native_recurrent_model.py": "813519b19afa578f6227e055988ce3b6e09677f7e8de50a9e3373b84fb4cfefd",
+    "native_recurrent_model.py": "e27f495924721e264e56c1bee34f99c8a00cf7e3a85462feb1e5cbd81da15aa7",
     "protocol.py": "19b6c833afb7dce5f0954d0a0a281da4c78ccdefdc0d209cf74d421da1a798f2",
     "batch.py": "ca1f6ce5d1f0560524df90e51e1557c4d35c126b6b25eff1463851f5e5fc619d",
-    "self_play.py": "50a6f5bc01bc4e47d42eb6ac7bf15370651de091f928932ad38b98260397d805",
-    "fixed_evaluation.py": "7015bfb8e6528af4917cccb86a10c790bd4e69b445aed233180623f4651aa620",
-    "training_runtime.py": "a9ae1d4a0b2e01cbe7d3f15bea6f938323d086838aad2da22cab452883b8035d",
-    "training_experiments.py": "645ab06bd5fefb684e4ae8af078225623a2849eed1585da455bb92592bec2a4b",
+    "self_play.py": "2612d36628e582f0d7ff23584ebc129f78a811494756c630bde70333e01ab4df",
+    "fixed_evaluation.py": "3507b9bcb236773a4cec7f95ddbc739376387fd96e5e6cbec836d0c1a94d4e80",
+    "training_runtime.py": "10999fe7f4f10a63d70fcfc8ee8b4b3262f041b0a6747c3bdb94e012c464ea4a",
+    "training_experiments.py": "82e2bff12214bd16f88eec3cfe4abfa088aa74fae7f863f939fcafa2fd4d9dd5",
     "train_native.py": "0e59374a3ff7e4fab2f0a3f69c85327998c133909887510bb867d87f3ca9a80f",
     "training_profiles/native_hybrid_ppo.json": "4909775f63fb417130399faba9a203c2a626f8462a657fdecc357a415b992d4d",
     "standard_match.json": "3b3c8c53e68127fae52a1997ce8a7270bd25eb9ff05b24cd6709122820e844ad",
     "requirements-training.txt": "cb786c2e321cfa70264bd2c1cefc18ca4021e967102d07b3413edcd646ad2c26",
     "vendor/firstlight/probe/minimal_capture.inc": "8cacb5d7f80c2a09b2ad29b98f64ad6d878f760555bc74f94e4c458108b2b347",
     "vendor/firstlight/NOTICE": "1d304a6d3243fd6629e2127903729eba05f930669a9e318a674ad62b90cf43ba",
-    "one_click_train.py": "ae79d063bc6f4332aed9b45d90d20e1f543328661e74de9a4b40e260674f4b72",
-    "auxiliary_validation.py": "78101eb380e1eeadb6d6b1a1c6ea0844d0a06c3dd1640b67a123d86d954fe196",
+    "one_click_train.py": "f86f7b540e766b41d9c621a87194f598f03a8d041a17809e799c52bfa1630a1a",
+    "auxiliary_validation.py": "2c897be6b3aeb8ee09b80a0be25a7cd717eaa145ccf45f08c6e4d448624f4493",
     "native_visualizer.py": "5e0fa078b956a2e7a8b84b340fca397870c1d41c384f7a864e3e176bc46c0c72",
-    "policy_inspection.py": "9fdde413cc3fd920c4eefc575a07d08810e2ba6af09a4d80dddc72075d7a1038",
-    "tests/test_training_fixes.py": "128cc0403904375c6f6378294d2dcf51f201a355fe331ba0f78a1e0b385fe18e",
-    "artifacts/experiments/20261010_mirror_v6_fixes/plan.json": "1741ca914c399046bd20ce56a2f7d5ed7a2c817a4ca0025f580ad963a9293085"
+    "policy_inspection.py": "d8f8856c73e77716bd2163d9fc92046fc934bd4c5aa1c1cfd6bb8f66ec54bd1d",
+    "tests/test_training_fixes.py": "b6a98959eac3d8637c245f9ac06f3b7d9b91c843e31b515a31d04708f6f10fca",
+    "tests/test_training_experiments.py": "9c51a8ebf5f09aaa309e2298d460776e91e54f6665745c3bb4708612086967bc",
+    "docs/essay/paper.md": "752bf6fb0767fe55016cf21a85c9c3592290b118731bfe18d63a8f1c7b8d8ed2",
+    "TRAINING.md": "151bec0f7564f23d4b355eff27ad001e470d82b0f1a25729d525e1f7cdc208f0",
+    "artifacts/experiments/20261010_static_review/plan.json": "36f8475bb3e104953a3583f34ec7623c595c6a772fb3fbea250fa7ce9796b5e0"
   },
   "primary_reference_urls": [
     "https://arxiv.org/abs/1707.06347",
@@ -97,5 +100,22 @@
     },
     "state_source": "Synthetic native-state fixtures; no native battles in this repair validation.",
     "native_runtime": "No connected Android device. Real auxiliary dataset and formal training remain pending."
+  },
+  "static_review_verification": {
+    "command": "/opt/anaconda3/envs/clash-royale/bin/python -m unittest discover -s tests -p test_*.py",
+    "tests_passed": 70,
+    "state_source": "Synthetic native-state fixtures; no native battle comparison.",
+    "checks": [
+      "incremental cycle belief equivalence",
+      "recurrent prediction equivalence after inference-only load",
+      "per-slot direct-opponent recurrent resets",
+      "invalid belief supervision masks",
+      "singleton minibatch finite parameters",
+      "configuration rejection",
+      "setup failure resource cleanup",
+      "training source identity and drift rejection"
+    ],
+    "mps": "Unavailable in this process; not revalidated in this review.",
+    "previous_engineering_verification": "engineering_verification retains the earlier verification record; its MPS result does not describe this review."
   }
 }
