@@ -194,6 +194,10 @@ def read_run_result(plan, run):
         raise ValueError("invalid parameter count")
     checkpoint_spec(root / "final_model.zip", config["algorithm"], metadata["model_sha256"])
     evaluation = root / "post_training" / "evaluation"
+    status = json.loads((evaluation / "status.json").read_text())
+    if (status.get("status") != "completed" or status.get("valid") is not True
+            or status.get("round") != config["rounds"]):
+        raise ValueError("held-out evaluation has not committed a valid completed result")
     checkpoint = json.loads((evaluation / "checkpoint.json").read_text())
     if checkpoint["sha256"] != metadata["model_sha256"] or checkpoint["algorithm"] != config["algorithm"]:
         raise ValueError("held-out evaluation does not correspond to the final checkpoint")
@@ -301,6 +305,8 @@ def build_report(suite_dir):
             writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
             writer.writeheader()
             writer.writerows(rows)
+    else:
+        (suite_dir / "per_seed.csv").unlink(missing_ok=True)
     lines = ["# Equal-budget ablation comparison", "",
              f"Valid complete suite: `{report['valid']}`. Training decisions per run: `{plan['total_decisions_per_run']}`.",
              "", "Statistics use training seeds as the independent unit. Final models use held-out battle seeds.",

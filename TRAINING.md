@@ -313,13 +313,17 @@ SHA-256；所有必要文件写入成功后才发布 `runtime.json`，恢复前�
 每次运行记录 `source_sha256.json`，并在 `summary.json` 中保存启动时的源码哈希；
 训练期间源码发生变化会使运行失效。正式实验汇总同时核验其与计划一致，哈希范围包括
 Python、训练配置、依赖约束和原生 probe 源码。已有旧计划应保留历史记录，使用修复后
-源码重新生成计划；当前计划为 `artifacts/experiments/20261010_static_review_6/plan.json`。
+源码重新生成计划；当前计划为 `artifacts/experiments/20261010_static_review_7/plan.json`。
 运行时也拒绝含训练产物的输出目录，且独占创建源码记录，防止重试或并发调用覆盖旧运行。
 已准备的 `config.json`、`console.log`、`status.json` 可以保留。
 
 离线固定评估使用显式 `evaluation_initial_policy_path`，或从 checkpoint 状态侧车、原运行
 目录查找初始基线，并利用侧车中的哈希核验。找不到原始基线时明确报错，不会用待评估
 模型替代初始策略。只评估 random 或其他冻结对手时不需要初始基线。
+离线评估在加载前固定 checkpoint 身份，加载后与完成前再次核验，并在赛程运行前
+写入 `checkpoint.json`。结果、摘要和图表全部写入后才发布 `status.json` 的完成标记；
+任何收尾异常都记录为失败，保留测试可归档后重跑。正式汇总要求有效的完成标记，
+不会仅凭已有逐局文件接纳失败结果；全部结果失效时清除上一次生成的 `per_seed.csv`。
 
 中断后的 `interrupted_model.zip` 是尽力保存的权重，可能处于采样或优化中间；恢复时
 优先使用最近一个完整的 `checkpoints/*.zip` 及其状态目录。最终轮在固定评估之前额外

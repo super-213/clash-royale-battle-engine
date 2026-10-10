@@ -296,6 +296,69 @@ class TrainingFixesTest(unittest.TestCase):
                 with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                     FixedEvaluationCallback(**dict(kwargs, **{key: value}))
 
+    def test_offline_evaluation_publishes_completion_after_required_artifacts(self):
+        import fixed_evaluation
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = dict(self.config(), evaluation_opponents=['random'])
+            self.train(root / 'train', config)
+            checkpoint = root / 'train/final_model.zip'
+            output = root / 'offline'
+            write = fixed_evaluation._atomic_json
+            def check(path, payload):
+                if Path(path).name == 'status.json' and payload.get('status') == 'completed':
+                    self.assertTrue((output / 'evaluation/checkpoint.json').is_file())
+                    self.assertTrue((output / 'charts/fixed_evaluation.svg').is_file())
+                return write(path, payload)
+            with patch('native_engine.native_vec_env.Batch', side_effect=lambda **kw: TerminalBatch(kw['battles'])):
+                with patch('fixed_evaluation._atomic_json', side_effect=check):
+                    result = evaluate_checkpoint(config, checkpoint, output)
+            self.assertTrue(result['latest']['valid'])
+
+    def test_failed_evaluation_finalization_remains_retryable(self):
+        import fixed_evaluation
+        from training_experiments import _prepare_held_out
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = dict(self.config(), evaluation_opponents=['random'])
+            self.train(root / 'train', config)
+            checkpoint = root / 'train/final_model.zip'
+            for fault in ('chart', 'identity'):
+                output = root / fault / 'post_training'
+                write = fixed_evaluation._atomic_json
+                def fail_identity(path, payload):
+                    if Path(path).name == 'checkpoint.json':
+                        raise OSError('identity write failed')
+                    return write(path, payload)
+                failure = (patch('fixed_evaluation._svg_chart', side_effect=OSError('chart write failed'))
+                           if fault == 'chart' else patch('fixed_evaluation._atomic_json', side_effect=fail_identity))
+                with patch('native_engine.native_vec_env.Batch', side_effect=lambda **kw: TerminalBatch(kw['battles'])):
+                    with failure, self.assertRaises(OSError):
+                        evaluate_checkpoint(config, checkpoint, output)
+                status = json.loads((output / 'evaluation/status.json').read_text())
+                self.assertEqual(status['status'], 'failed')
+                self.assertTrue(_prepare_held_out(root / fault))
+                self.assertTrue((output / 'evaluation_failed_001').is_dir())
+
+    def test_offline_evaluation_rejects_checkpoint_replaced_during_inference(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = dict(self.config(), evaluation_opponents=['random'])
+            self.train(root / 'train', config)
+            checkpoint = root / 'train/final_model.zip'
+            original = checkpoint.read_bytes()
+            run_wave = FixedEvaluationCallback._run_wave
+            def replace_after_wave(callback, *args, **kwargs):
+                result = run_wave(callback, *args, **kwargs)
+                checkpoint.write_bytes(original + b'changed during inference')
+                return result
+            output = root / 'offline'
+            with patch('native_engine.native_vec_env.Batch', side_effect=lambda **kw: TerminalBatch(kw['battles'])):
+                with patch.object(FixedEvaluationCallback, '_run_wave', replace_after_wave):
+                    with self.assertRaisesRegex(ValueError, 'hash changed'):
+                        evaluate_checkpoint(config, checkpoint, output)
+            self.assertEqual(json.loads((output / 'evaluation/status.json').read_text())['status'], 'failed')
+
     def test_model_construction_failure_closes_environment(self):
         env = NativeBatchVecEnv(battles=2, batch_factory=lambda **kw: FakeBatch(2))
         with TemporaryDirectory() as directory:

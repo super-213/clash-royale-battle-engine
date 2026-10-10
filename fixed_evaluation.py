@@ -113,6 +113,18 @@ def _atomic_json(path, payload):
     temporary.replace(path)
 
 
+def _record_evaluation_failure(root, round_number, error):
+    try:
+        _atomic_json(root / "status.json", {
+            "status": "failed", "updated_at": _timestamp(), "round": round_number,
+            "error_type": type(error).__name__, "error": str(error),
+        })
+    except OSError as status_error:
+        # A full/read-only filesystem may prevent even the failure marker.
+        # Keep the original exception, rather than hiding it with this write.
+        error.add_note(f"could not write evaluation failure status: {status_error}")
+
+
 class FixedPolicyOpponent:
     """Expose one frozen recurrent policy as a NativeBatchVecEnv opponent."""
 
@@ -356,6 +368,7 @@ class FixedEvaluationCallback(BaseCallback):
         if self.deferred and self.restore_training:
             raise ValueError("deferred evaluation must not reset training environments")
         self.pending_checkpoints = {}
+        self.checkpoint_identity = None
         self.elapsed_seconds = 0.0
         self.evaluated_rounds = set()
         self.summaries = []
@@ -553,8 +566,12 @@ class FixedEvaluationCallback(BaseCallback):
             self.model._last_original_obs = normalize.get_original_obs()
 
     def evaluate(self, round_number):
-        with preserve_random_state():
-            self._evaluate(round_number)
+        try:
+            with preserve_random_state():
+                self._evaluate(round_number)
+        except BaseException as error:
+            _record_evaluation_failure(self.root, round_number, error)
+            raise
 
     def _evaluate(self, round_number):
         round_number = int(round_number)
@@ -591,15 +608,6 @@ class FixedEvaluationCallback(BaseCallback):
                             role,
                             seeds[start : start + self.battles],
                         ))
-        except BaseException as error:
-            _atomic_json(self.root / "status.json", {
-                "status": "failed",
-                "updated_at": _timestamp(),
-                "round": round_number,
-                "error_type": type(error).__name__,
-                "error": str(error),
-            })
-            raise
         finally:
             if self.restore_training:
                 self._reset_training_environment()
@@ -627,10 +635,9 @@ class FixedEvaluationCallback(BaseCallback):
         with self.csv_path.open("a", newline="", encoding="utf-8") as stream:
             writer = csv.DictWriter(stream, fieldnames=EVALUATION_COLUMNS)
             writer.writerows(summaries)
-        self.summaries.extend(summaries)
-        self.evaluated_rounds.add(round_number)
+        all_summaries = [*self.summaries, *summaries]
         aggregate = summaries[-1]
-        self._latest = {
+        latest = {
             "eval/round": round_number,
             "eval/games": aggregate["games"],
             "eval/win_rate": aggregate["win_rate"],
@@ -644,20 +651,28 @@ class FixedEvaluationCallback(BaseCallback):
             "updated_at": _timestamp(),
             "aggregate": aggregate,
             "by_opponent": summaries[:-1],
-            "evaluated_rounds": sorted(self.evaluated_rounds),
+            "evaluated_rounds": sorted(self.evaluated_rounds | {round_number}),
         })
+        charts = self.root.parent / "charts"
+        charts.mkdir(exist_ok=True)
+        _svg_chart(charts / "fixed_evaluation.svg", all_summaries)
+        if self.checkpoint_identity is not None:
+            spec = self.checkpoint_identity
+            checkpoint_spec(spec["path"], spec["algorithm"], spec["sha256"])
+        # Completion is the commit marker for every required output above.
         _atomic_json(self.root / "status.json", {
             "status": "completed",
             "updated_at": _timestamp(),
             "round": round_number,
+            "timesteps": int(self.num_timesteps),
             "games": aggregate["games"],
             "score_rate": aggregate["score_rate"],
             "valid": aggregate["valid"],
             "timed_out": aggregate["timed_out"],
         })
-        charts = self.root.parent / "charts"
-        charts.mkdir(exist_ok=True)
-        _svg_chart(charts / "fixed_evaluation.svg", self.summaries)
+        self.summaries = all_summaries
+        self.evaluated_rounds.add(round_number)
+        self._latest = latest
         print(
             f"[fixed-eval-complete] round={round_number} games={aggregate['games']} "
             f"win_rate={aggregate['win_rate']} "
@@ -721,9 +736,11 @@ def evaluate_checkpoint(config, checkpoint, output_dir):
     if (output_dir / "evaluation").exists():
         raise ValueError("use a fresh output directory for checkpoint evaluation")
     baseline = initial_policy_path(config, checkpoint)
+    identity = checkpoint_spec(checkpoint, config["algorithm"])
     algorithm = load_object(config["algorithm"])
     with preserve_random_state():
         model = load_inference_model(algorithm, checkpoint, config["device"])
+        checkpoint_spec(checkpoint, config["algorithm"], identity["sha256"])
         env_kwargs = dict(config.get("environment_kwargs", {}))
         env_kwargs.update(port=int(config["port"]), decision_ticks=int(config["decision_ticks"]))
         callback = FixedEvaluationCallback(
@@ -745,10 +762,15 @@ def evaluate_checkpoint(config, checkpoint, output_dir):
         )
         callback.init_callback(model)
         callback.num_timesteps = model.num_timesteps
+        callback.checkpoint_identity = identity
+        try:
+            _atomic_json(output_dir / "evaluation" / "checkpoint.json", identity)
+        except BaseException as error:
+            _record_evaluation_failure(callback.root, model.num_timesteps // int(config["rollout_decisions"]), error)
+            raise
         callback.evaluate(model.num_timesteps // int(config["rollout_decisions"]))
         result = callback.summary()
-        result["checkpoint"] = checkpoint_spec(checkpoint, config["algorithm"])
-        _atomic_json(output_dir / "evaluation" / "checkpoint.json", result["checkpoint"])
+        result["checkpoint"] = identity
         return result
 
 

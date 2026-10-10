@@ -133,6 +133,19 @@ class TrainingExperimentsTest(unittest.TestCase):
         self.assertIsNone(row["score_rate"])
         self.assertIsNone(row["win_rate"])
 
+    def test_report_removes_stale_csv_when_no_results_are_valid(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = {'runs': [{'variant': 'full', 'seed': 0}], 'variants': ['full'],
+                    'training_seeds': [0, 1, 2], 'total_decisions_per_run': 16}
+            (root / 'plan.json').write_text(json.dumps(plan))
+            csv_path = root / 'per_seed.csv'
+            csv_path.write_text('previously valid results\n')
+            with patch.object(experiments, 'read_run_result', side_effect=ValueError('result invalidated')):
+                report = experiments.build_report(root)
+            self.assertFalse(report['valid'])
+            self.assertFalse(csv_path.exists())
+
     def test_evaluation_restores_python_numpy_and_torch_rng_even_on_failure(self):
         random.seed(123)
         np.random.seed(123)
@@ -218,6 +231,13 @@ class TrainingExperimentsTest(unittest.TestCase):
             run_dir = Path(plan["runs"][0]["run_dir"])
             matches = run_dir / "post_training" / "evaluation" / "matches.jsonl"
             original = matches.read_text()
+            status_path = run_dir / 'post_training/evaluation/status.json'
+            original_status = json.loads(status_path.read_text())
+            for values in ({'status': 'failed'}, {'status': 'running'}, {'valid': False}, {'round': 999}):
+                status_path.write_text(json.dumps(dict(original_status, **values)))
+                with self.subTest(status=values), self.assertRaisesRegex(ValueError, 'committed'):
+                    experiments.read_run_result(plan, plan['runs'][0])
+            status_path.write_text(json.dumps(original_status))
             matches.write_text(original + original.splitlines()[0] + "\n")
             self.assertFalse(experiments.build_report(suite)["valid"])
             matches.write_text(original)
