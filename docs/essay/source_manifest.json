@@ -1,7 +1,7 @@
 {
   "prepared_date": "2026-10-10",
   "timezone": "Asia/Shanghai",
-  "git_head": "caf4fe874550183ff4301e19eca497c07938d032",
+  "git_head": "aacce6a708836f849e4498573fbf18331e47d39c",
   "paper_scope": "Methods and experiment design only; no empirical battle results",
   "architecture": "action_conditioned_world_model_stateful_v6",
   "verification_environment": {
@@ -39,31 +39,31 @@
       "legacy_v5"
     ],
     "path": null,
-    "status": "not regenerated after ninth static review; historical plans and frozen checkpoints removed; formal native runs not executed",
+    "status": "not regenerated after tenth static review; historical plans and frozen checkpoints removed; formal native runs not executed",
     "last_prepared_path": "artifacts/experiments/20261010_static_review_8/plan.json"
   },
   "source_sha256": {
-    "TRAINING.md": "457bf407bd9e54588296375a3ab121a410a52abfb32526cfaad9e46da5238afd",
+    "TRAINING.md": "789c9c27cbca12d75702b2f509744a2acc2c05b7bbf9b17a6b4ae0382d18409b",
     "auxiliary_validation.py": "2102fc6ffa18b6cb066fb90fcb86a00458803ac54cc749355596ca50e55ea7af",
     "batch.py": "08e874a0e4cf93a42759ba599b4fd2c2cf2878e70aba43d6deb17ed861b1a1d8",
-    "docs/essay/paper.md": "09bca5c9ed4e8833394db22bc74cf2120c15dcbc1929cbfd4f3202855059a2a7",
+    "docs/essay/paper.md": "eb220df6f5a0f488e5b04272d1259d3dc26527891f5b979aab36548017a719d1",
     "engine.py": "79b05f200b2a4dfc9c807a7562aa99c7b86de4727ed51dfb90cd1d95030245fb",
     "fixed_evaluation.py": "bd6591a6e3916487fab81743d69f006c66784b4ab770baef58fdac44277e9d82",
     "native_cross_modal.py": "c8cf4c6ce2e5a77acc9790e94a4fe56159b8a7e1235d4c980cfd4b41a3dd2a4f",
     "native_model.py": "0300d5214b589a13783a425c9cafae21c2846f1685c5a116ba7b2f96cd9ce602",
     "native_recurrent_model.py": "1b8f946e71fab34694d4b4617be05a0b8bbcbb71382d5b3aff8456b423cfe992",
     "native_spatial_model.py": "a3320bb6b2e7b6cb91856c2fd3db56f9470f18924f7bd2925d772f89dfb9ae48",
-    "native_vec_env.py": "c7c9bae06d49cf5dac55c9eb236f50789e78fdba4d13f9731d92902b17745f26",
+    "native_vec_env.py": "08ea7016f1c2cce10b5dfce1352ba04335ae117be2dfe05b4bcf4d30408d0911",
     "native_visualizer.py": "e10bb8740d971afa219ae27a41683e4019a9c71ff9ddfe8b071777a1299097c2",
     "native_world_model.py": "fb84cc8d4c77ca13841ba1b41af7d5082526bba8d8987c7710f8c47cccfd01e7",
     "one_click_train.py": "da430efbb0f651bb5030a93318ad4deea7b944259d203a6917f0e282ec2fd5bc",
     "policy_inspection.py": "d8f8856c73e77716bd2163d9fc92046fc934bd4c5aa1c1cfd6bb8f66ec54bd1d",
     "protocol.py": "19b6c833afb7dce5f0954d0a0a281da4c78ccdefdc0d209cf74d421da1a798f2",
     "requirements-training.txt": "cb786c2e321cfa70264bd2c1cefc18ca4021e967102d07b3413edcd646ad2c26",
-    "self_play.py": "fdbda6f7b2e520ddfc4aa3b0b447217b8516f67bcb83424fed22bfc43c54d6ea",
+    "self_play.py": "3b4c4478cf5477e5d2e8974b4859d72a284e1e113b8badc5efe7ab3a1da63048",
     "standard_match.json": "3b3c8c53e68127fae52a1997ce8a7270bd25eb9ff05b24cd6709122820e844ad",
     "tests/test_client_failures.py": "3e9d86422ea167d16ad7fd5669356a072619e9a2bea4aa0c58e26c3a2b032ddb",
-    "tests/test_self_play.py": "e93f57d79cc5dd0d297e240954d70e5510d1e1ba2445ae08fb8f8927fc5f1bce",
+    "tests/test_self_play.py": "e5749a22f06224b4fbb1fed5ec32193c0d4ba43efee9558029b2f39cf323d34b",
     "tests/test_training_experiments.py": "1030b1aad6b67b91e8dec085ef142a5e4e1549bc048aff0a1b60bfd0639d5bdd",
     "tests/test_training_fixes.py": "08c257e2a57b7024c2bce5a7003f5531581f4a9428e0a0749681b305a27820bd",
     "train_native.py": "0e59374a3ff7e4fab2f0a3f69c85327998c133909887510bb867d87f3ca9a80f",
@@ -73,7 +73,7 @@
     "vendor/firstlight/NOTICE": "1d304a6d3243fd6629e2127903729eba05f930669a9e318a674ad62b90cf43ba",
     "vendor/firstlight/probe/minimal_capture.inc": "8cacb5d7f80c2a09b2ad29b98f64ad6d878f760555bc74f94e4c458108b2b347",
     "policy_contracts.py": "39196603c60a23fe44001894bdf8a547a8d4d7e24d6995528468c061e3f2097f",
-    "tests/test_native_vec_env.py": "48a5161fd854044421a6be0d009d7061d1b959d0914fb3c82990054db21c57f0"
+    "tests/test_native_vec_env.py": "94b1be369c14f2684816907cee035ad633a845471be2102c742e0ba44c6cc603"
   },
   "primary_reference_urls": [
     "https://arxiv.org/abs/1707.06347",
@@ -288,7 +288,7 @@
     "native_model.py": "0300d5214b589a13783a425c9cafae21c2846f1685c5a116ba7b2f96cd9ce602",
     "native_recurrent_model.py": "1b8f946e71fab34694d4b4617be05a0b8bbcbb71382d5b3aff8456b423cfe992",
     "native_spatial_model.py": "a3320bb6b2e7b6cb91856c2fd3db56f9470f18924f7bd2925d772f89dfb9ae48",
-    "native_vec_env.py": "c7c9bae06d49cf5dac55c9eb236f50789e78fdba4d13f9731d92902b17745f26",
+    "native_vec_env.py": "08ea7016f1c2cce10b5dfce1352ba04335ae117be2dfe05b4bcf4d30408d0911",
     "native_visualizer.py": "e10bb8740d971afa219ae27a41683e4019a9c71ff9ddfe8b071777a1299097c2",
     "native_world_model.py": "fb84cc8d4c77ca13841ba1b41af7d5082526bba8d8987c7710f8c47cccfd01e7",
     "observation.py": "2e7da0315606b26b9d4bafcf36e37f20d3252f11d0dc77e5d75f777559553ede",
@@ -297,7 +297,7 @@
     "policy_inspection.py": "d8f8856c73e77716bd2163d9fc92046fc934bd4c5aa1c1cfd6bb8f66ec54bd1d",
     "protocol.py": "19b6c833afb7dce5f0954d0a0a281da4c78ccdefdc0d209cf74d421da1a798f2",
     "requirements-training.txt": "cb786c2e321cfa70264bd2c1cefc18ca4021e967102d07b3413edcd646ad2c26",
-    "self_play.py": "fdbda6f7b2e520ddfc4aa3b0b447217b8516f67bcb83424fed22bfc43c54d6ea",
+    "self_play.py": "3b4c4478cf5477e5d2e8974b4859d72a284e1e113b8badc5efe7ab3a1da63048",
     "standard_match.json": "3b3c8c53e68127fae52a1997ce8a7270bd25eb9ff05b24cd6709122820e844ad",
     "status.py": "7e724544fe3bd50988193b172b13338e1aa37cc0861e8fd180fd8e2558c7af91",
     "train_native.py": "0e59374a3ff7e4fab2f0a3f69c85327998c133909887510bb867d87f3ca9a80f",
@@ -337,5 +337,20 @@
     "vendor/firstlight/probe/tower_troop_runtime_telemetry.inc": "593698b76e4ce752e4b82973cbfb26ffb5990944a61731bc4daf190d1a58234f",
     "vendor/firstlight/probe/visibility_runtime_layout.h": "15e1e61574941bd545b9534d431e8bc80f3af0a37f4cb985b822d136698764b9",
     "vendor/firstlight/probe/visibility_runtime_telemetry.inc": "44b1f2147203b108069c0ad2a76988fee8f19ffade7e409b09559b7b9ff4364a"
+  },
+  "tenth_static_review_verification": {
+    "command": "/opt/anaconda3/envs/clash-royale/bin/python -m unittest discover -s tests -v",
+    "tests_passed": 113,
+    "state_source": "Synthetic native-state and multi-opponent failure fixtures; no native battle comparison.",
+    "checks": [
+      "built-in legal random opponents construct only action masks rather than full opponent observations",
+      "mask-only random path preserves seeded actions, observations, rewards and labels across both roles and terminal resets",
+      "self-play opponent memory is committed only after every inference group succeeds",
+      "later-group malformed actions or inference exceptions preserve earlier groups memory and fresh-episode flags",
+      "successful retries advance each opponent memory exactly once"
+    ],
+    "mps_available": false,
+    "native_runtime": "Not exercised in this review; no strategy or measured throughput claims.",
+    "compatibility": "Network dimensions, RNG consumption and checkpoint schemas unchanged; custom and model opponents still receive full observations."
   }
 }

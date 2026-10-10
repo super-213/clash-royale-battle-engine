@@ -528,6 +528,10 @@ class NativeBatchVecEnv(VecEnv):
         before = tuple(slot.state for slot in self.slots)
         opponent_observations = [
             self._observation(slot, owner=1 - slot.learner_owner)
+            if self.opponent_policy is not None else {
+                # The built-in random opponent consumes only legal actions.
+                "action_mask": self._action_mask(slot.state, 1 - slot.learner_owner, slot.initial_towers)
+            }
             for slot in self.slots
         ]
         opponent_actions = self._opponent_actions(opponent_observations)

@@ -279,6 +279,7 @@ class SelfPlayOpponentPool:
             raise ValueError(f"self-play expected {self.battles} observations, got {count}")
         actions = np.zeros((count, 3), dtype=np.int64)
         grouped = defaultdict(list)
+        pending_states = {}
         for slot_index in range(count):
             assignment = self.assignments.get(slot_index)
             if assignment is None:
@@ -332,8 +333,7 @@ class SelfPlayOpponentPool:
             predicted = validated_actions(predicted, len(indices), f"opponent {opponent_id}")
             actions[indices] = predicted
             for offset, index in enumerate(indices):
-                self.assignments[index]["episode_start"] = False
-                self.assignments[index]["recurrent_state"] = (
+                pending_states[index] = (
                     None
                     if next_state is None
                     else tuple(
@@ -341,6 +341,11 @@ class SelfPlayOpponentPool:
                         for component in next_state
                     )
                 )
+        # No native step will occur if a later group fails. Commit memory only
+        # after every group has produced valid actions and copied next states.
+        for index, state in pending_states.items():
+            self.assignments[index]["episode_start"] = False
+            self.assignments[index]["recurrent_state"] = state
         return actions, None
 
     def on_episode_end(self, slot_index, winner, learner_role):

@@ -795,6 +795,44 @@ class NativeBatchVecEnvTest(unittest.TestCase):
         finally:
             env.close()
 
+    def test_random_opponent_skips_full_observations_and_preserves_seeded_steps(self):
+        fake, reference_fake = FakeBatch(2), FakeBatch(2)
+        env = NativeBatchVecEnv(battles=2, seed=37, learner_roles=(0, 1),
+                               batch_factory=lambda **kwargs: fake)
+        reference = NativeBatchVecEnv(battles=2, seed=37, learner_roles=(0, 1),
+                                     batch_factory=lambda **kwargs: reference_fake)
+        try:
+            env.reset()
+            reference.reset()
+            predict = reference._opponent_actions
+            def full_observations(_):
+                return predict([reference._observation(slot, owner=1-slot.learner_owner)
+                                for slot in reference.slots])
+            with patch.object(reference, '_opponent_actions', side_effect=full_observations), \
+                    patch.object(env, '_observation', wraps=env._observation) as observation:
+                for step in range(5):
+                    fake.finish_slot_zero = reference_fake.finish_slot_zero = step >= 2
+                    actual = env.step(np.zeros((2, 3), dtype=np.int64))
+                    expected = reference.step(np.zeros((2, 3), dtype=np.int64))
+                    for key in actual[0]:
+                        np.testing.assert_array_equal(actual[0][key], expected[0][key])
+                    np.testing.assert_array_equal(actual[1], expected[1])
+                    np.testing.assert_array_equal(actual[2], expected[2])
+                    for actual_info, expected_info in zip(actual[3], expected[3]):
+                        self.assertEqual(actual_info.keys(), expected_info.keys())
+                        for key in actual_info:
+                            if key == 'terminal_observation':
+                                for name in actual_info[key]:
+                                    np.testing.assert_array_equal(actual_info[key][name], expected_info[key][name])
+                            else:
+                                np.testing.assert_equal(actual_info[key], expected_info[key])
+                    self.assertEqual(fake.step_calls[-1], reference_fake.step_calls[-1])
+                self.assertTrue(all(call.kwargs.get('owner') is None for call in observation.call_args_list))
+                self.assertEqual(observation.call_count, 13)  # Ten successor rows plus three terminal rows.
+        finally:
+            env.close()
+            reference.close()
+
     def test_one_batch_step_covers_all_slots_and_transforms_roles(self):
         env, fake = self.make_env()
         try:

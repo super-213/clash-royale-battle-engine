@@ -186,6 +186,46 @@ class SelfPlayOpponentPoolTest(unittest.TestCase):
             self.assertEqual(len(manifest["matchups"]), 1)
             pool.close()
 
+    def test_later_group_failure_does_not_advance_any_opponent_memory(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = root / 'snapshot.zip'
+            snapshot.write_bytes(b'historical model')
+            current, historical = FakePolicy(), FakePolicy()
+            pool = SelfPlayOpponentPool(root, FakeAlgorithm, 'cpu', 2,
+                                       current_ratio=1, historical_ratio=0)
+            pool.set_current_model(current)
+            pool.register_snapshot('historical', snapshot, 0)
+            for slot in (0, 1):
+                pool.on_episode_start(slot, 0, slot, 0)
+            pool.assignments[1].update(id='historical', category='historical')
+            with patch.object(pool, '_load_snapshot', return_value=historical):
+                pool.predict(observations(2))
+                # Keep one ongoing game and one fresh game in different groups.
+                pool.on_episode_start(1, 1, 2, 0)
+                pool.assignments[1].update(id='historical', category='historical')
+                original = historical.predict
+                for failure in ('fractional_action', 'exception'):
+                    def fail(observation, **kwargs):
+                        if failure == 'exception':
+                            raise RuntimeError('later opponent failed')
+                        _, state = original(observation, **kwargs)
+                        return np.full((1, 3), .5), state
+                    with self.subTest(failure=failure), patch.object(historical, 'predict', side_effect=fail):
+                        with self.assertRaises((ValueError, RuntimeError)):
+                            pool.predict(observations(2))
+                    self.assertFalse(pool.assignments[0]['episode_start'])
+                    for component in pool.assignments[0]['recurrent_state']:
+                        np.testing.assert_array_equal(component, np.ones((1, 1, 2)))
+                    self.assertTrue(pool.assignments[1]['episode_start'])
+                    self.assertIsNone(pool.assignments[1]['recurrent_state'])
+                pool.predict(observations(2))
+                for slot, expected in ((0, 2), (1, 1)):
+                    self.assertFalse(pool.assignments[slot]['episode_start'])
+                    for component in pool.assignments[slot]['recurrent_state']:
+                        np.testing.assert_array_equal(component, np.full((1, 1, 2), expected))
+            pool.close()
+
     def test_random_current_and_history_ratios_must_sum_to_one(self):
         with TemporaryDirectory() as directory:
             with self.assertRaises(ValueError):
