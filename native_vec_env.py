@@ -545,6 +545,8 @@ class NativeBatchVecEnv(VecEnv):
         states = self.batch.step(groups, ticks=self.decision_ticks)
         if len(states) != self.battles:
             raise RuntimeError(f"batch step returned {len(states)} of {self.battles} states")
+        if len(self.batch.last_receipts) != self.battles:
+            raise RuntimeError("batch step returned an incomplete receipt group list")
 
         rewards = np.zeros(self.battles, dtype=np.float32)
         dones = np.zeros(self.battles, dtype=bool)
@@ -623,6 +625,8 @@ class NativeBatchVecEnv(VecEnv):
 
         if done_slots:
             reset_states = self.batch.reset_slots(done_slots, done_seeds)
+            if len(reset_states) != len(done_slots):
+                raise RuntimeError("batch partial reset returned an incomplete state list")
             for index, state, episode_seed in zip(done_slots, reset_states, done_seeds):
                 self._begin_episode(self.slots[index], state, episode_seed)
                 self.reset_infos[index] = self._reset_info(self.slots[index])

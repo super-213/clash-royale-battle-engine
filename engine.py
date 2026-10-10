@@ -36,12 +36,15 @@ class Engine:
         if self.connection:
             return
         self.connection = socket.create_connection(self.address, timeout=self.timeout)
-        self.stream = self.connection.makefile('rb')
-        self.connection.sendall(b'session-v1\n')
-        response = self._receive()
-        if not response.get('ok'):
+        try:
+            self.stream = self.connection.makefile('rb')
+            self.connection.sendall(b'session-v1\n')
+            response = self._receive()
+            if not response.get('ok'):
+                raise RuntimeError(response.get('error', 'control session failed'))
+        except BaseException:
             self.close()
-            raise RuntimeError(response.get('error', 'control session failed'))
+            raise
 
     def close(self):
         if self.stream:
@@ -65,7 +68,7 @@ class Engine:
             self.connect()
             self.connection.sendall((command + '\n').encode())
             return self._receive()
-        except Exception:
+        except BaseException:
             self.close()
             raise
 
@@ -77,26 +80,43 @@ class Engine:
         self.state = None
         match = json.loads(Path(__file__).with_name('standard_match.json').read_text())
         match['rndSeed'] = seed
-        self.request('configure ' + json.dumps(match, separators=(',', ':')))
-        self.request('step 90')  # First playable boundary; execute the first action at tick 91.
-        self.state = self._capture()
+        for command in ('configure ' + json.dumps(match, separators=(',', ':')), 'step 90'):
+            response = self.request(command)
+            if not response.get('ok'):
+                raise RuntimeError(response.get('error', 'battle reset failed'))
+        state = self._capture()
+        if state.tick != 90:
+            raise RuntimeError(f'engine missed the first playable tick: {state.tick}')
+        self.state = state
         return self.state
 
     def step(self, actions=(), ticks=5):
         before = self.state
+        if before is None:
+            raise RuntimeError('reset the engine before stepping it')
+        if not 1 <= ticks <= 1_000_000:
+            raise ValueError('ticks must be between 1 and 1,000,000')
         actions = tuple(actions)
         cards = []
         fields = ['minimal-transition', str(before.generation), str(before.next_sequence),
                   str(ticks), str(len(actions))]
         for action in actions:
+            if action.owner not in (0, 1):
+                raise ValueError('action owner must be 0 or 1')
             player = before.players[action.owner]
             card = next((c for c in player.hand if c.slot == action.slot), None)
+            if card is None:
+                raise ValueError(f'hand slot {action.slot} is unavailable for owner {action.owner}')
             cards.append(card.card)
             fields.extend(map(str, (action.owner, action.slot, action.x, action.y)))
         # A partial transport failure invalidates this client until reset; never replay writes.
         self.state = None
         after = State.decode(self.request(' '.join(fields)))
         advanced = after.tick - before.tick
+        if after.generation != before.generation or not 0 <= advanced <= ticks or (
+            not after.finalized and advanced != ticks
+        ):
+            raise RuntimeError('engine returned a stale generation or invalid tick advancement')
         executed = tuple(any(e.owner == a.owner and e.card == card and e.tick == before.tick + 1
                              for e in after.plays) for a, card in zip(actions, cards))
         self.state = after
@@ -126,12 +146,17 @@ class RenderedEngine(Engine):
                 raise TimeoutError('native renderer did not create the battle scene')
             time.sleep(0.05)
         paused = self.request('pause')
+        if not paused.get('ok'):
+            raise RuntimeError(paused.get('error', 'could not pause native renderer'))
         current_tick = paused['tick']
         if current_tick < 90:
-            self.request(f'advance-native {90 - current_tick}')
-        self.state = self._capture()
-        if self.state.tick != 90:
-            raise RuntimeError(f'native renderer missed the first playable tick: {self.state.tick}')
+            advanced = self.request(f'advance-native {90 - current_tick}')
+            if not advanced.get('ok'):
+                raise RuntimeError(advanced.get('error', 'could not advance native renderer'))
+        state = self._capture()
+        if state.tick != 90:
+            raise RuntimeError(f'native renderer missed the first playable tick: {state.tick}')
+        self.state = state
         return self.state
 
     def step(self, actions=(), ticks=5):
@@ -143,6 +168,8 @@ class RenderedEngine(Engine):
         actions = tuple(actions)
         cards = []
         for action in actions:
+            if action.owner not in (0, 1):
+                raise ValueError('action owner must be 0 or 1')
             player = before.players[action.owner]
             card = next((card for card in player.hand if card.slot == action.slot), None)
             if card is None:
@@ -159,12 +186,17 @@ class RenderedEngine(Engine):
         if not advanced.get('ok'):
             raise RuntimeError(advanced.get('error', 'could not advance native renderer'))
         after = self._capture(before.generation, before.next_sequence)
+        advanced_ticks = after.tick - before.tick
+        if after.generation != before.generation or not 0 <= advanced_ticks <= ticks or (
+            not after.finalized and advanced_ticks != ticks
+        ):
+            raise RuntimeError('renderer returned a stale generation or invalid tick advancement')
         executed = tuple(any(event.owner == action.owner and event.card == card
                              and event.tick == before.tick + 1
                              for event in after.plays)
                          for action, card in zip(actions, cards))
         self.state = after
-        return Transition(after, after.tick - before.tick, executed)
+        return Transition(after, advanced_ticks, executed)
 
     def set_speed(self, multiplier):
         if multiplier not in (0.25, 0.5, 1, 2, 4):

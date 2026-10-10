@@ -43,6 +43,7 @@ def record_replay(config, model, steps=64, seed=2_900_001, port=None):
     try:
         observation = env.reset()
         for _ in range(steps):
+            before_tick = env.env_method('get_state')[0].tick
             actions, state = model.predict(observation, state=state, episode_start=starts, deterministic=True)
             head = model.policy.action_net
             head.heatmaps()  # Require the spatial policy rather than showing fabricated maps.
@@ -57,8 +58,9 @@ def record_replay(config, model, steps=64, seed=2_900_001, port=None):
                          probabilities=probabilities.tolist(), legal=legal.tolist(),
                          slot_probabilities=distribution.slot_distribution.probs.detach().cpu().numpy()[0].tolist())
             observation, _, dones, infos = env.step(actions)
-            frame.update(tick=infos[0]['tick'] - config['decision_ticks'], seed=infos[0]['seed'],
-                         role=infos[0]['learner_role'], accepted=infos[0]['deployment_succeeded'])
+            frame.update(tick=before_tick, next_tick=infos[0]['tick'], seed=infos[0]['seed'],
+                         role=infos[0]['learner_role'], accepted=infos[0]['deployment_succeeded'],
+                         terminal=bool(dones[0]))
             frames.append(frame)
             starts = dones
         return frames

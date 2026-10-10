@@ -10,6 +10,12 @@ import torch.nn.functional as F
 from policy_inspection import checkpoint_config, load_policy
 from training_runtime import load_object, _atomic_json, _sha256
 from fixed_evaluation import checkpoint_spec, preserve_random_state
+from native_engine.native_vec_env import (
+    ENTITY_TARGET_SCHEMA, EXECUTED_ACTION_SCHEMA, EXECUTED_ACTION_FEATURES,
+    MAX_ENTITIES, TRANSITION_TARGET_SCHEMA,
+)
+
+DATASET_SCHEMA = 'native_auxiliary_validation_v2'
 
 
 def scene_value(scalar):
@@ -39,6 +45,8 @@ def collect_dataset(config, model, output, seed_base=2_900_001, seed_count=8,
         raise ValueError('validation seeds overlap development or held-out test seeds')
     rows = []
     horizon = int(config['auxiliary_horizon'])
+    if horizon <= 0:
+        raise ValueError('auxiliary_horizon must be positive')
     for wave in range(0, seed_count, battles):
         count = min(battles, seed_count - wave)
         kwargs = dict(config.get('environment_kwargs', {}))
@@ -62,7 +70,7 @@ def collect_dataset(config, model, output, seed_base=2_900_001, seed_count=8,
                 for slot, info in enumerate(infos):
                     scalar = info.get('terminal_observation', {}).get('scalar', after['scalar'][slot])
                     row = {f'obs_{key}': value[slot].copy() for key, value in observation.items()}
-                    row.update(wave=wave, decision=decision,
+                    row.update(wave=wave, decision=decision, slot=slot,
                                episode_start=starts[slot], executed_action=info['executed_action'],
                                entity_targets=info['entity_targets'], transition_targets=info['transition_targets'],
                                seed=info['seed'], role=int(info['learner_role'][1:]),
@@ -83,15 +91,16 @@ def collect_dataset(config, model, output, seed_base=2_900_001, seed_count=8,
             rows.extend(row for step_rows in wave_rows for row in step_rows)
         finally:
             env.close()
-    arrays = {key: np.stack([row[key] for row in rows]) for key in rows[0]
-              if key not in {'next_scene', 'done'}}
+    arrays = {key: np.stack([row[key] for row in rows]) for key in rows[0]}
     weights = hashlib.sha256()
     for name, value in sorted(model.policy.state_dict().items()):
         weights.update(name.encode())
         weights.update(value.detach().cpu().contiguous().numpy().tobytes())
     arrays['metadata'] = np.asarray(json.dumps({
-        'schema': 'native_auxiliary_validation_v1', 'observation_schema': env.observation_schema,
-        'transition_target_schema': 'public_damage_result_v2',
+        'schema': DATASET_SCHEMA, 'observation_schema': env.observation_schema,
+        'entity_target_schema': ENTITY_TARGET_SCHEMA,
+        'executed_action_schema': EXECUTED_ACTION_SCHEMA,
+        'transition_target_schema': TRANSITION_TARGET_SCHEMA,
         'seed_base': seed_base, 'initial_seed_count': seed_count, 'samples': len(rows),
         'auxiliary_horizon': horizon, 'decision_ticks': config['decision_ticks'],
         'opponent': 'legal_random', 'learner': 'deterministic_collection_checkpoint',
@@ -105,6 +114,92 @@ def collect_dataset(config, model, output, seed_base=2_900_001, seed_count=8,
     return output
 
 
+def _validated_groups(data, metadata, observation_space):
+    """Reject corrupt/aligned-to-the-wrong-episode labels before inference."""
+    count = metadata.get('samples', 0)
+    if not isinstance(count, int) or count <= 0:
+        raise ValueError('dataset must contain a positive sample count')
+    shapes = {f'obs_{key}': (count, *space.shape)
+              for key, space in observation_space.spaces.items()}
+    shapes.update({key: (count,) for key in (
+        'wave', 'decision', 'slot', 'episode_start', 'seed', 'role', 'done', 'next_scene')})
+    shapes.update(executed_action=(count, EXECUTED_ACTION_FEATURES),
+                  entity_targets=(count, MAX_ENTITIES, 4), transition_targets=(count, 8),
+                  future_targets=(count, 2))
+    for key, shape in shapes.items():
+        value = data.get(key)
+        if value is None or value.shape != shape or value.dtype.kind not in 'biuf' or not np.isfinite(value).all():
+            raise ValueError(f'invalid dataset array: {key}')
+    for key in ('wave', 'decision', 'slot', 'seed', 'role'):
+        value = data[key]
+        if np.any(value < 0) or np.any(value != np.floor(value)):
+            raise ValueError(f'invalid dataset index: {key}')
+    for key in ('episode_start', 'done', 'role'):
+        if not np.isin(data[key], (0, 1)).all():
+            raise ValueError(f'invalid dataset flag: {key}')
+    for value in (data['entity_targets'][..., 0], data['entity_targets'][..., 3],
+                  data['transition_targets'][:, 7], data['future_targets'][:, 1]):
+        if not np.isin(value, (0, 1)).all():
+            raise ValueError('invalid dataset target validity flag')
+    actions = data['executed_action']
+    if (np.any((actions < 0) | (actions > 1)) or not np.isin(actions[:, :9], (0, 1)).all()
+            or np.any(actions[:, :9].sum(-1) != 1) or np.any(actions[actions[:, 0] == 1, -2:] != 0)):
+        raise ValueError('invalid dataset executed actions')
+    for key, space in observation_space.spaces.items():
+        value = data[f'obs_{key}']
+        if np.any(value < space.low) or np.any(value > space.high):
+            raise ValueError(f'dataset observation outside its space: {key}')
+    hand = data['obs_hand']
+    if np.any(hand != np.floor(hand)):
+        raise ValueError('dataset hand identities must be integers')
+    groups = {}
+    for index, key in enumerate(zip(data['wave'].tolist(), data['decision'].tolist())):
+        groups.setdefault(key, []).append(index)
+    previous_key, previous = None, None
+    for key, indices in groups.items():
+        indices = np.asarray(indices)
+        if not np.array_equal(data['slot'][indices], np.arange(len(indices))):
+            raise ValueError('dataset slots must be ordered and unique per decision')
+        if previous_key is None or key[0] != previous_key[0]:
+            if key[1] != 0 or (previous_key is not None and key <= previous_key) or not data['episode_start'][indices].all():
+                raise ValueError('dataset waves must begin at decision zero with fresh memory')
+        else:
+            if key[1] != previous_key[1] + 1 or len(indices) != len(previous):
+                raise ValueError('dataset decisions must be consecutive with stable slots')
+            if not np.array_equal(data['episode_start'][indices], data['done'][previous]):
+                raise ValueError('dataset episode boundaries do not match terminal flags')
+            ongoing = ~data['episode_start'][indices].astype(bool)
+            for name in ('seed', 'role'):
+                if not np.array_equal(data[name][indices][ongoing], data[name][previous][ongoing]):
+                    raise ValueError('dataset episode identity changes without a reset')
+        # Groups must also occupy consecutive rows, otherwise prediction
+        # concatenation and the stored target arrays would use different orders.
+        if not np.array_equal(indices, np.arange(indices[0], indices[0] + len(indices))):
+            raise ValueError('dataset rows must be ordered by wave, decision and slot')
+        previous_key, previous = key, indices
+    horizon = metadata['auxiliary_horizon']
+    if not isinstance(horizon, int) or horizon <= 0:
+        raise ValueError('dataset prediction horizon must be a positive integer')
+    waves = {}
+    for (wave, _), indices in groups.items():
+        waves.setdefault(wave, []).append(np.asarray(indices))
+    for steps in waves.values():
+        for step, indices in enumerate(steps):
+            endpoint = step + horizon - 1
+            valid = np.zeros(len(indices), dtype=bool)
+            if endpoint < len(steps):
+                valid[:] = True
+                for intervening in steps[step:endpoint]:
+                    valid &= ~data['done'][intervening].astype(bool)
+            future = data['future_targets'][indices]
+            if not np.array_equal(future[:, 1], valid):
+                raise ValueError('dataset future labels cross episodes or exceed the recorded horizon')
+            if valid.any() and not np.allclose(future[valid, 0], data['next_scene'][steps[endpoint]][valid],
+                                              rtol=0, atol=1e-6):
+                raise ValueError('dataset future labels do not match the recorded endpoint')
+    return groups
+
+
 def score_dataset(config, model, dataset, batch_size=64):
     if batch_size <= 0:
         raise ValueError('batch_size must be positive')
@@ -116,14 +211,19 @@ def score_dataset(config, model, dataset, batch_size=64):
         # Materialize each compressed array once, rather than once per minibatch.
         data = {key: archive[key] for key in archive.files}
     metadata = json.loads(str(data['metadata']))
+    if metadata.get('schema') != DATASET_SCHEMA:
+        raise ValueError('unsupported dataset schema; collect a new v2 dataset')
     if metadata['observation_schema'] != model.policy.features_extractor.observation_schema:
         raise ValueError('dataset observation schema differs from checkpoint')
     if metadata['transition_target_schema'] != 'public_damage_result_v2':
         raise ValueError('dataset transition target schema differs from training')
+    if metadata.get('entity_target_schema') != ENTITY_TARGET_SCHEMA or metadata.get('executed_action_schema') != EXECUTED_ACTION_SCHEMA:
+        raise ValueError('dataset entity/action target schema differs from training')
     if metadata['decision_ticks'] != config['decision_ticks']:
         raise ValueError('dataset decision interval differs from checkpoint')
     if metadata['auxiliary_horizon'] != config['auxiliary_horizon']:
         raise ValueError('dataset prediction horizon differs from checkpoint')
+    groups = _validated_groups(data, metadata, model.observation_space)
     with torch.no_grad():
         # Rebuild THIS checkpoint's recurrent memory on recorded observations.
         # Collection-model hidden states are not portable between checkpoints.
@@ -131,9 +231,6 @@ def score_dataset(config, model, dataset, batch_size=64):
         prior_wave = None
         # Index rows once. Scanning all N rows for each decision is quadratic
         # in trajectory length, even though recurrent replay itself is linear.
-        groups = {}
-        for index, key in enumerate(zip(data['wave'].tolist(), data['decision'].tolist())):
-            groups.setdefault(key, []).append(index)
         for (wave, decision), indices in groups.items():
             batch = np.asarray(indices)
             if wave != prior_wave:

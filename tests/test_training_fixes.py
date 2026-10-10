@@ -109,6 +109,27 @@ class TrainingFixesTest(unittest.TestCase):
         finally:
             env.close()
 
+    def test_environment_rejects_truncated_receipts_and_partial_reset_results(self):
+        fake = FakeBatch(2)
+        env = NativeBatchVecEnv(battles=2, batch_factory=lambda **kw: fake)
+        try:
+            env.reset()
+            step = fake.step
+            def truncated(*args, **kwargs):
+                result = step(*args, **kwargs)
+                fake.last_receipts = fake.last_receipts[:1]
+                return result
+            with patch.object(fake, 'step', side_effect=truncated):
+                with self.assertRaisesRegex(RuntimeError, 'receipt group'):
+                    env.step(np.zeros((2, 3), dtype=np.int64))
+            env.reset()
+            fake.finish_slot_zero = True
+            with patch.object(fake, 'reset_slots', return_value=()):
+                with self.assertRaisesRegex(RuntimeError, 'partial reset'):
+                    env.step(np.zeros((2, 3), dtype=np.int64))
+        finally:
+            env.close()
+
     def test_configuration_rejects_invalid_values_before_training(self):
         for key, value in (
             ('rollout_decisions', 0), ('epochs_per_round', 0), ('decision_ticks', 0),
@@ -367,6 +388,86 @@ class TrainingFixesTest(unittest.TestCase):
             model = NativeActionConditionedWorldModelPPO.load(checkpoint, device='cpu')
             self.assertEqual(model._n_updates, 2)
             self.assertTrue((resume_directory(checkpoint) / 'runtime.json').is_file())
+
+    def test_resume_rejects_missing_or_changed_fixed_baseline(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self.config()
+            config['fixed_evaluation_enabled'] = True
+            self.train(root / 'first', config)
+            checkpoint = root / 'first/final_model.zip'
+            saved = resume_directory(checkpoint)
+            baseline = saved / 'initial_policy.zip'
+            original = baseline.read_bytes()
+            resumed = json.loads((saved / 'config.json').read_text())
+            resumed.update(rounds=3, resume_from=str(checkpoint))
+            baseline.unlink()
+            with self.assertRaisesRegex(ValueError, 'missing.*baseline'):
+                self.train(root / 'missing', resumed)
+            baseline.write_bytes(original + b'changed')
+            with self.assertRaisesRegex(ValueError, 'baseline no longer matches'):
+                self.train(root / 'changed', resumed)
+            baseline.write_bytes(original)
+            self.train(root / 'valid', resumed)
+            self.assertEqual((resume_directory(root / 'valid/final_model.zip') / 'initial_policy.zip').read_bytes(), original)
+
+    def test_auxiliary_dataset_rejects_misaligned_and_corrupt_labels_before_inference(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self.config()
+            self.train(root / 'train', config)
+            model = load_inference_model(NativeActionConditionedWorldModelPPO, root / 'train/final_model.zip', 'cpu')
+            with patch('native_engine.native_vec_env.Batch', side_effect=lambda **kw: TerminalBatch(kw['battles'])):
+                dataset = collect_dataset(config, model, root / 'validation.npz', seed_count=3, decisions=4, battles=2)
+            with np.load(dataset, allow_pickle=False) as archive:
+                original = {key: archive[key].copy() for key in archive.files}
+            def change_schema(data):
+                metadata = json.loads(str(data['metadata']))
+                metadata['schema'] = 'native_auxiliary_validation_v1'
+                data['metadata'] = np.asarray(json.dumps(metadata))
+            def reorder(data):
+                order = np.arange(len(data['slot']))
+                order[:4] = [0, 2, 1, 3]
+                for key in data:
+                    if key != 'metadata':
+                        data[key] = data[key][order]
+            mutations = [change_schema, reorder,
+                         lambda d: d.update(obs_scalar=d['obs_scalar'][:, :-1]),
+                         lambda d: d['obs_scalar'].__setitem__((0, 0), np.nan),
+                         lambda d: d['episode_start'].__setitem__(2, True),
+                         lambda d: d['seed'].__setitem__(2, 1),
+                         lambda d: d['slot'].__setitem__(1, 0),
+                         lambda d: d['future_targets'].__setitem__((0, 0), 999),
+                         lambda d: d['future_targets'].__setitem__((4, 1), 1),
+                         lambda d: d['executed_action'].__setitem__((0, slice(None)), 0)]
+            for index, mutate in enumerate(mutations):
+                data = {key: value.copy() for key, value in original.items()}
+                mutate(data)
+                path = root / f'corrupt_{index}.npz'
+                np.savez_compressed(path, **data)
+                with self.subTest(mutation=index), patch.object(model.policy, 'get_distribution') as infer:
+                    with self.assertRaises(ValueError):
+                        score_dataset(config, model, path)
+                    infer.assert_not_called()
+            result = score_dataset(config, model, dataset, batch_size=1)
+            self.assertEqual(result['dataset']['samples'], 12)
+
+    def test_replay_records_real_tick_when_terminal_step_is_short(self):
+        class ShortTerminalBatch(FakeBatch):
+            def step(self, actions=(), ticks=5):
+                states = super().step(actions, ticks=3)
+                self.states = tuple(replace(state, finalized=True, result=0, crowns=(1, 0)) for state in states)
+                return tuple(self.states)
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self.config()
+            self.train(root / 'train', config)
+            model = load_inference_model(NativeActionConditionedWorldModelPPO, root / 'train/final_model.zip', 'cpu')
+            with patch('native_engine.native_vec_env.Batch', side_effect=lambda **kw: ShortTerminalBatch(kw['battles'])):
+                frame = record_replay(config, model, steps=1)[0]
+            self.assertEqual(frame['tick'], 90)
+            self.assertEqual(frame['next_tick'], 93)
+            self.assertTrue(frame['terminal'])
 
     def test_independent_auxiliary_dataset_and_actual_heatmap_replay(self):
         with TemporaryDirectory() as directory:

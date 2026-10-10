@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from stable_baselines3.common.callbacks import BaseCallback
-from training_runtime import load_inference_model
+from training_runtime import load_inference_model, _sha256
 
 
 def _timestamp():
@@ -158,6 +158,7 @@ class SelfPlayOpponentPool:
             "path": str(path),
             "round": int(round_number),
             "created_at": _timestamp(),
+            "sha256": _sha256(path),
         }
         self.snapshots.append(entry)
         self.ratings.setdefault(snapshot_id, self.learner_elo)
@@ -239,6 +240,8 @@ class SelfPlayOpponentPool:
             self._loaded_models[snapshot_id] = model
             return model
         entry = self._snapshot_entry(snapshot_id)
+        if entry.get("sha256") is not None and _sha256(entry["path"]) != entry["sha256"]:
+            raise ValueError(f"historical snapshot changed: {snapshot_id}")
         model = load_inference_model(self.algorithm_class, entry["path"], self.device)
         self._loaded_models[snapshot_id] = model
         while len(self._loaded_models) > self.loaded_model_limit:
@@ -426,8 +429,11 @@ class SelfPlayOpponentPool:
         snapshots = []
         for entry in self.snapshots:
             filename = f"{entry['id']}.zip"
+            digest = _sha256(entry["path"])
+            if entry.get("sha256") is not None and entry["sha256"] != digest:
+                raise ValueError(f"historical snapshot changed: {entry['id']}")
             shutil.copyfile(entry["path"], directory / filename)
-            snapshots.append({**entry, "path": filename})
+            snapshots.append({**entry, "path": filename, "sha256": digest})
         _atomic_json(directory / "state.json", {
             "snapshots": snapshots, "ratings": self.ratings,
             "learner_elo": self.learner_elo, "learner_generation": self.learner_generation,
@@ -439,6 +445,14 @@ class SelfPlayOpponentPool:
     def restore_state(self, directory):
         directory = Path(directory)
         saved = json.loads((directory / "state.json").read_text())
+        for entry in saved["snapshots"]:
+            source = directory / entry["path"]
+            if not source.is_file():
+                raise ValueError(f"resume historical snapshot is missing: {entry['id']}")
+            if entry.get("sha256") is not None and _sha256(source) != entry["sha256"]:
+                raise ValueError(f"resume historical snapshot changed: {entry['id']}")
+        self._loaded_models.clear()
+        self._retired_snapshots.clear()
         self.snapshots = []
         for entry in saved["snapshots"]:
             source = directory / entry["path"]

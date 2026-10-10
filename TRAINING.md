@@ -290,13 +290,17 @@ conda run -n clash-royale python train_native.py --rounds 10 --output artifacts/
 副本、评级、比赛聚合和联赛 RNG；模型文件保留优化器及累计更新数。续训启动新对局，
 不恢复 resident 内部战斗、正在进行的对手分配和对局循环状态，因此不保证逐步轨迹相同。
 核心训练配置必须一致，可更改累计轮数、设备、端口和新运行目录。
+固定评估启用时，续训必须保留原始 `initial_policy.zip`，缺失时拒绝续训，避免把恢复后的
+策略当成初始基线。新保存的状态记录初始基线和历史对手快照的 SHA-256，恢复前核验；
+历史快照注册后在加载和保存时也核验身份。旧状态若没有这些校验值，只能检查文件存在，
+无法追溯验证其内容是否被替换。
 
 历史对手、固定评估和离线检查使用 `load_inference_model`，加载后释放训练 rollout
 缓冲区和优化器状态；该对象仅用于推理。续训使用标准 `algorithm.load`，保留完整优化器。
 每次运行记录 `source_sha256.json`，并在 `summary.json` 中保存启动时的源码哈希；
 训练期间源码发生变化会使运行失效。正式实验汇总同时核验其与计划一致，哈希范围包括
 Python、训练配置、依赖约束和原生 probe 源码。已有旧计划应保留历史记录，使用修复后
-源码重新生成计划；当前计划为 `artifacts/experiments/20261010_static_review/plan.json`。
+源码重新生成计划；当前计划为 `artifacts/experiments/20261010_static_review_2/plan.json`。
 
 中断后的 `interrupted_model.zip` 是尽力保存的权重，可能处于采样或优化中间；恢复时
 优先使用最近一个完整的 `checkpoints/*.zip` 及其状态目录。最终轮在固定评估之前额外
@@ -318,6 +322,7 @@ conda run -n clash-royale python native_visualizer.py \
 需要已就绪的原生服务；工具记录 deterministic learner 对合法随机对手的轨迹，输出
 独立 HTML 与 JSON。回放可逐帧选牌查看实际掩码后的条件落点概率、非法格、双方占据、
 等待概率和所选动作；从 checkpoint 侧车或运行目录自动读取配置。
+每帧记录真实的 `tick`、`next_tick` 和 `terminal`，终局短步长不会按完整决策间隔倒推。
 
 ## 独立辅助预测验证
 
@@ -336,6 +341,9 @@ conda run -n clash-royale python auxiliary_validation.py evaluate \
 和实验计划的保留测试 seeds。数据记录观测/标签 schema、决策间隔、horizon、seed/角色、
 采集策略权重哈希与 checkpoint；评分记录数据文件哈希，不更新参数。比较模型时固定
 同一数据文件，各模型从观测序列重建自己的循环状态，不复用采集模型的 hidden state。
+当前格式为 `native_auxiliary_validation_v2`，保存 slot、终局标记和后继场景值。评分前
+核验数组形状、有限值、观测范围、动作编码、时间／slot 顺序、重置边界，以及未来标签
+是否对应同局的指定 horizon。旧 v1 数据缺少这些校验字段，需要重新采集。
 支持 v5/v6，v4 没有辅助头，不参与辅助预测评分。输出塔血/位移/短期指标 MAE、实体
 消失 BCE/准确率、伤害结果准确率，以及公开圣水/卡序重构指标和有效标签数。
 

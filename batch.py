@@ -94,11 +94,14 @@ class Batch:
 
     def reset(self, seed=1):
         self.close()
+        self.states = tuple(None for _ in range(self.battles))
+        self.last_receipts = tuple(() for _ in range(self.battles))
         slots = tuple(range(self.battles))
         seeds = tuple(seed + battle for battle in slots)
         self._configure_slots(slots, seeds)
         self._open()
         states = self._advance(90, ())  # first playable boundary, as Engine.reset
+        self._validate_reset_ticks(states)
         self.last_receipts = tuple(() for _ in range(self.battles))
         return states
 
@@ -125,15 +128,25 @@ class Batch:
 
         self.close()
         self._configure_slots(slots, seeds, advance=90)
+        current = list(self.states)
+        for slot in slots:
+            current[slot] = None
+        self.states = tuple(current)
         self._open()
         refreshed = self._exchange(
             tuple((slot, (), 0) for slot in slots)
         )
+        self._validate_reset_ticks(refreshed)
         receipts = list(self.last_receipts)
         for slot in slots:
             receipts[slot] = ()
         self.last_receipts = tuple(receipts)
         return refreshed
+
+    def _validate_reset_ticks(self, states):
+        if any(state.tick != 90 or state.finalized for state in states):
+            self.close()
+            raise RuntimeError('batch reset missed the first playable tick')
 
     def step(self, actions=(), ticks=5):
         return self._advance(ticks, actions)
@@ -175,13 +188,16 @@ class Batch:
 
     def _open(self):
         self.connection = socket.create_connection(self.address, timeout=self.timeout)
-        self.connection.sendall(b'batch-fast-v1\n')
-        magic, version, status, capacity, reserved = HANDSHAKE.unpack(
-            _receive(self.connection, HANDSHAKE.size))
-        if (magic, version, status, reserved) != (b'CRBH', VERSION, 0, 0) or capacity < self.battles:
+        try:
+            self.connection.sendall(b'batch-fast-v1\n')
+            magic, version, status, capacity, reserved = HANDSHAKE.unpack(
+                _receive(self.connection, HANDSHAKE.size))
+            if (magic, version, status, reserved) != (b'CRBH', VERSION, 0, 0) or capacity < self.battles:
+                raise RuntimeError(
+                    f'batch handshake rejected: version={version} status={status} capacity={capacity}')
+        except BaseException:
             self.close()
-            raise RuntimeError(
-                f'batch handshake rejected: version={version} status={status} capacity={capacity}')
+            raise
 
     def _advance(self, ticks, actions):
         if not self.connection:
@@ -229,7 +245,7 @@ class Batch:
                 raise RuntimeError(f'batch response header mismatch: {response!r}')
             states = []
             all_receipts = []
-            for expected_slot in slots:
+            for expected_slot, plays, ticks in entries:
                 slot, status, count, flags, size = RESPONSE_ENTRY.unpack(
                     _receive(self.connection, RESPONSE_ENTRY.size))
                 if slot != expected_slot or count > MAX_ACTIONS or flags or size > MAX_PAYLOAD:
@@ -241,7 +257,20 @@ class Batch:
                 payload = json.loads(_receive(self.connection, size))
                 if status:
                     raise RuntimeError(f'battle {slot} failed: {payload.get("error", payload)}')
-                states.append(State.decode(payload))
+                if count != len(plays) or any(
+                    (receipt.kind, receipt.owner, receipt.action_index) != (1, play.owner, index)
+                    for index, (play, receipt) in enumerate(zip(plays, receipts))
+                ):
+                    raise RuntimeError(f'battle {slot} action receipts do not match the request')
+                state = State.decode(payload)
+                previous = self.states[slot]
+                if previous is not None:
+                    advanced = state.tick - previous.tick
+                    if state.generation != previous.generation or not 0 <= advanced <= ticks or (
+                        not state.finalized and advanced != ticks
+                    ):
+                        raise RuntimeError(f'battle {slot} returned a stale generation or invalid tick advancement')
+                states.append(state)
                 all_receipts.append(receipts)
             self.sequence += 1
             current_states = list(self.states)
@@ -252,6 +281,6 @@ class Batch:
             self.states = tuple(current_states)
             self.last_receipts = tuple(current_receipts)
             return tuple(states)
-        except Exception:
+        except BaseException:
             self.close()
             raise

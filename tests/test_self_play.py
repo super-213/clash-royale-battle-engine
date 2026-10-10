@@ -54,6 +54,33 @@ class SelfPlayOpponentPoolTest(unittest.TestCase):
     def setUp(self):
         FakeAlgorithm.loads.clear()
 
+    def test_historical_snapshot_identity_is_checked_on_load_save_and_resume(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = root / 'snapshot.zip'
+            snapshot.write_bytes(b'original snapshot')
+            pool = SelfPlayOpponentPool(root, FakeAlgorithm, 'cpu', 1)
+            pool.register_snapshot('first', snapshot, 0)
+            pool.save_state(root / 'saved')
+            snapshot.write_bytes(b'changed snapshot')
+            with self.assertRaisesRegex(ValueError, 'snapshot changed'):
+                pool._load_snapshot('first')
+            with self.assertRaisesRegex(ValueError, 'snapshot changed'):
+                pool.save_state(root / 'changed')
+            FakeAlgorithm.loads.clear()
+            restored = SelfPlayOpponentPool(root / 'restore', FakeAlgorithm, 'cpu', 1)
+            restored.restore_state(root / 'saved')
+            self.assertEqual(Path(restored.snapshots[0]['path']).read_bytes(), b'original snapshot')
+            saved_snapshot = root / 'saved/first.zip'
+            saved_snapshot.write_bytes(b'changed snapshot')
+            with self.assertRaisesRegex(ValueError, 'resume historical snapshot changed'):
+                restored.restore_state(root / 'saved')
+            saved_snapshot.unlink()
+            with self.assertRaisesRegex(ValueError, 'resume historical snapshot is missing'):
+                restored.restore_state(root / 'saved')
+            pool.close()
+            restored.close()
+
     def test_historical_opponent_is_batched_and_results_update_elo(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

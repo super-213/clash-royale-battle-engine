@@ -96,6 +96,7 @@ def save_resume_state(checkpoint, model, config, pool=None, telemetry=None):
     baseline = config.get("_initial_policy_path")
     if baseline and Path(baseline).is_file():
         shutil.copyfile(baseline, directory / "initial_policy.zip")
+        state["initial_policy_sha256"] = _sha256(directory / "initial_policy.zip")
     try:
         state["next_native_seed"] = model.get_env().get_attr("_seed_cursor")[0]
     except AttributeError:
@@ -961,8 +962,15 @@ def _run_sb3_training(config, run_dir, resources):
         baseline_dir = run_dir / "evaluation" / "baselines"
         baseline_dir.mkdir(parents=True, exist_ok=True)
         baseline_path = baseline_dir / "initial_policy.zip"
-        if resume_from and (resume_directory(resume_from) / "initial_policy.zip").exists():
-            shutil.copyfile(resume_directory(resume_from) / "initial_policy.zip", baseline_path)
+        if resume_from:
+            saved_baseline = resume_directory(resume_from) / "initial_policy.zip"
+            if not saved_baseline.is_file():
+                raise ValueError("resume state is missing its fixed initial-policy baseline")
+            saved_runtime = json.loads((resume_directory(resume_from) / "runtime.json").read_text())
+            expected_hash = saved_runtime.get("initial_policy_sha256")
+            if expected_hash is not None and expected_hash != _sha256(saved_baseline):
+                raise ValueError("resume initial-policy baseline no longer matches its saved runtime state")
+            shutil.copyfile(saved_baseline, baseline_path)
         else:
             model.save(baseline_path.with_suffix(""))
         config["_initial_policy_path"] = str(baseline_path)
