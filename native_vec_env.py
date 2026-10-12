@@ -380,6 +380,7 @@ class NativeBatchVecEnv(VecEnv):
         learner_roles: str | Sequence[int] = "alternating",
         opponent_policy: Any = None,
         batch_factory: Callable[..., Any] | None = None,
+        planning_labels: bool = False,
     ):
         if not 1 <= int(battles) <= 16:
             raise ValueError("battles must be between 1 and 16")
@@ -390,6 +391,7 @@ class NativeBatchVecEnv(VecEnv):
         self.decision_ticks = int(decision_ticks)
         self.base_seed = int(seed)
         self.opponent_policy = opponent_policy
+        self.planning_labels = bool(planning_labels)
         self._opponent_state = None
         self._opponent_episode_starts = np.ones(self.battles, dtype=bool)
         self._batch_factory = batch_factory or Batch
@@ -618,6 +620,18 @@ class NativeBatchVecEnv(VecEnv):
                     learner, plays, receipts, new_state.plays
                 ),
             }
+            if self.planning_labels:
+                # Training-only channel. Never expose a controller's private
+                # observation/hand to the learner or to the search root.
+                from .planning_rules import executed_identity
+                info['planning'] = {
+                    'schema': 'public_planning_transition_v1',
+                    'opponent_action': executed_identity(_executed_action_features(
+                        opponent, plays, receipts, new_state.plays), mirror=True),
+                    'accepted': bool(accepted),
+                    'ticks': int(new_state.tick - old_state.tick),
+                    'next_observation': self._observation(slot),
+                }
             if new_state.finalized:
                 if hasattr(self.opponent_policy, "on_episode_end"):
                     info.update(self.opponent_policy.on_episode_end(

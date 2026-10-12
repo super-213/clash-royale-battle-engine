@@ -1,5 +1,5 @@
 """Resident batch client: several battles in one lane, stepped together."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import socket
 import struct
@@ -270,6 +270,15 @@ class Batch:
                         not state.finalized and advanced != ticks
                     ):
                         raise RuntimeError(f'battle {slot} returned a stale generation or invalid tick advancement')
+                    if state.next_sequence < previous.next_sequence:
+                        raise RuntimeError(f'battle {slot} returned a regressing event cursor')
+                    # Minimal resident captures begin at the current bind's
+                    # epoch. With one slot there is no bind switch, so the
+                    # epoch also contains already delivered plays. Preserve
+                    # the incremental State.plays contract by native sequence,
+                    # never by tick/card identity (same-tick plays are valid).
+                    state = replace(state, plays=tuple(event for event in state.plays
+                                                       if event.sequence >= previous.next_sequence))
                 states.append(state)
                 all_receipts.append(receipts)
             self.sequence += 1

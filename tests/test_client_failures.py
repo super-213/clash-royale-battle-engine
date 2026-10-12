@@ -168,6 +168,23 @@ class ClientFailureTest(unittest.TestCase):
         self.assertEqual(batch.step(ticks=5)[0].tick, 93)
         batch.close()
 
+    def test_single_slot_epoch_repeated_plays_are_delivered_once_by_sequence(self):
+        previous = payload()
+        previous.update(plays=[[1, 81, 0, 26000000, 3], [2, 90, 1, 26000001, 3]], next=3)
+        response = payload(tick=95)
+        response.update(plays=[*previous['plays'], [3, 91, 0, 26000000, 3]], next=4)
+        batch = self.batch_response(response)
+        batch.states = (protocol.State.decode(previous),)
+        state = batch.step(ticks=5)[0]
+        self.assertEqual([event.sequence for event in state.plays], [3])
+        self.assertEqual(state.next_sequence, 4)
+        batch.close()
+        response['next'] = 2
+        batch = self.batch_response(response)
+        batch.states = (protocol.State.decode(previous),)
+        with self.assertRaisesRegex(RuntimeError, 'event cursor'):
+            batch.step(ticks=5)
+
 
 if __name__ == '__main__':
     unittest.main()

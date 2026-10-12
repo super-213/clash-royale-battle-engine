@@ -17,6 +17,9 @@ from .observation import Observer
 
 
 def __getattr__(name):
+    if name == 'NativePlanningAgent':
+        from .planning_policy import NativePlanningAgent
+        return NativePlanningAgent
     if name in ("NativeBatchVecEnv", "native_observation_space"):
         from .native_vec_env import NativeBatchVecEnv, native_observation_space
         return {

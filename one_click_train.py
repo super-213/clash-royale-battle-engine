@@ -129,7 +129,7 @@ def prepare_config(profile, defaults_only=False):
 
     print("\n基础训练设置（直接回车使用默认值）：")
     config["run_name"] = ask("运行名称", default_name)
-    config["rounds"] = ask("训练轮次（1轮 = 1次 rollout + PPO 更新）", config["rounds"], int, lambda value: value > 0)
+    config["rounds"] = ask("训练轮次（1轮 = 采集 + 网络更新）", config["rounds"], int, lambda value: value > 0)
     config["battles"] = ask("并行战斗数量", config["battles"], int, lambda value: value > 0)
     config["decision_ticks"] = ask("每次决策推进的 native ticks", config["decision_ticks"], int, lambda value: value > 0)
     config["seed"] = ask("随机种子", config["seed"], int)
@@ -166,6 +166,13 @@ def prepare_config(profile, defaults_only=False):
         )
     config["auto_bootstrap"] = ask_yes_no("端口未就绪时自动运行 bootstrap_emulator.py", True)
 
+    if config.get('planning_enabled'):
+        if ask_yes_no('修改多步规划参数', False):
+            for key, label in (('planning_budget', '每次决策的模型转移预算'),
+                               ('planning_depth', '最大推演深度'), ('planning_candidates', '根候选动作数'),
+                               ('planning_updates', '每轮网络更新次数')):
+                config[key] = ask(label, config[key], int, lambda value: value >= 2)
+        return config
     if ask_yes_no("修改 PPO 高级参数", False):
         print("\n高级设置：")
         config["rollout_decisions"] = ask("每轮决策总数", config["rollout_decisions"], int, lambda value: value > 0)
@@ -240,6 +247,9 @@ def prepare_config(profile, defaults_only=False):
 
 
 def validate_config(config):
+    if config.get('planning_enabled'):
+        from native_engine.planning_training import validate_planning_config
+        validate_planning_config(config)
     integer_fields = (
         "rounds", "battles", "batch_size", "checkpoint_every_rounds", "rollout_decisions",
         "epochs_per_round", "decision_ticks", "seed", "port", "evaluation_port",
@@ -370,18 +380,22 @@ def print_plan(config, run_dir):
     print(f"  并行环境   : {config['battles']}")
     print(f"  设备       : {config['device']}")
     print(f"  检查点间隔 : {config['checkpoint_every_rounds']} 轮")
+    if config.get('planning_enabled'):
+        print(f"  多步规划   : depth={config['planning_depth']}，budget={config['planning_budget']}，"
+              f"candidates={config['planning_candidates']}，warmup={config['planning_warmup_rounds']} rounds，"
+              f"memory={config['planning_hidden_dim']}，spatial={config['planning_spatial_dim']}")
     if config.get("recurrent_enabled"):
         print(
             f"  持续记忆   : LSTM {config['recurrent_layers']}×"
             f"{config['recurrent_hidden_size']}，TBPTT={config['tbptt_steps']}"
         )
-    if config.get("cross_modal_enabled"):
+    if config.get("cross_modal_enabled") and not config.get('planning_enabled'):
         print(
             f"  跨模态融合 : {config['cross_modal_heads']} heads × "
             f"{config['cross_modal_dim']} dim，"
             f"entity layers={config['cross_modal_entity_layers']}"
         )
-    if config.get("spatial_heatmap_enabled"):
+    if config.get("spatial_heatmap_enabled") and not config.get('planning_enabled'):
         print(
             "  空间动作头   : 32×18 full-resolution heatmap，"
             f"CNN backbone channels={config['spatial_feature_channels']}"

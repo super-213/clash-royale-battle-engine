@@ -37,6 +37,7 @@ EVALUATION_COLUMNS = (
     "invalid_actions",
     "action_decisions",
     "invalid_action_rate",
+    "mean_prediction_seconds", "mean_search_transitions", "max_search_depth",
 )
 
 
@@ -253,6 +254,9 @@ def _summarize(matches, round_number, timesteps, opponent_id, elapsed):
             sum(match.get("invalid_actions", 0) for match in matches)
             / max(1, sum(match["decisions"] for match in matches))
         ),
+        "mean_prediction_seconds": mean('prediction_seconds_per_decision'),
+        "mean_search_transitions": mean('search_transitions_per_decision'),
+        "max_search_depth": max((match.get('search_depth', 0) for match in matches), default=0),
     }
 
 
@@ -478,18 +482,29 @@ class FixedEvaluationCallback(BaseCallback):
         episode_starts = np.ones(count, dtype=bool)
         rewards = np.zeros(count, dtype=np.float64)
         invalid_actions = np.zeros(count, dtype=np.int64)
+        prediction_seconds = np.zeros(count, dtype=np.float64)
+        search_transitions = np.zeros(count, dtype=np.int64)
+        search_depth = np.zeros(count, dtype=np.int64)
         pending = set(range(count))
         matches = []
         last_infos = [{} for _ in range(count)]
         try:
             observations = env.reset()
             for decision in range(1, self.max_decisions + 1):
+                prediction_started = time.monotonic()
                 actions, state = self.model.predict(
                     observations,
                     state=state,
                     episode_start=episode_starts,
                     deterministic=True,
                 )
+                prediction_elapsed = time.monotonic() - prediction_started
+                diagnostics = getattr(self.model, 'last_search', [])
+                for slot in pending:
+                    prediction_seconds[slot] += prediction_elapsed / count
+                    if len(diagnostics) == count:
+                        search_transitions[slot] += diagnostics[slot]['transitions']
+                        search_depth[slot] = max(search_depth[slot], diagnostics[slot]['depth'])
                 observations, step_rewards, dones, infos = env.step(actions)
                 rewards += np.asarray(step_rewards, dtype=np.float64)
                 episode_starts = np.asarray(dones, dtype=bool)
@@ -516,6 +531,9 @@ class FixedEvaluationCallback(BaseCallback):
                         "decisions": decision,
                         "invalid_actions": int(invalid_actions[slot]),
                         "timed_out": False,
+                        'prediction_seconds_per_decision': float(prediction_seconds[slot] / decision),
+                        'search_transitions_per_decision': float(search_transitions[slot] / decision),
+                        'search_depth': int(search_depth[slot]),
                     }
                     matches.append(match)
                     pending.remove(slot)
@@ -539,6 +557,9 @@ class FixedEvaluationCallback(BaseCallback):
                     "decisions": self.max_decisions,
                     "invalid_actions": int(invalid_actions[slot]),
                     "timed_out": True,
+                    'prediction_seconds_per_decision': float(prediction_seconds[slot] / self.max_decisions),
+                    'search_transitions_per_decision': float(search_transitions[slot] / self.max_decisions),
+                    'search_depth': int(search_depth[slot]),
                 })
         finally:
             env.close()
@@ -740,6 +761,11 @@ def evaluate_checkpoint(config, checkpoint, output_dir):
     algorithm = load_object(config["algorithm"])
     with preserve_random_state():
         model = load_inference_model(algorithm, checkpoint, config["device"])
+        if config.get('planning_enabled'):
+            from dataclasses import replace
+            overrides = {key: config[f'evaluation_search_{key}'] for key in ('budget', 'depth')
+                         if f'evaluation_search_{key}' in config}
+            model.search_settings = replace(model.search_settings, **overrides)
         checkpoint_spec(checkpoint, config["algorithm"], identity["sha256"])
         env_kwargs = dict(config.get("environment_kwargs", {}))
         env_kwargs.update(port=int(config["port"]), decision_ticks=int(config["decision_ticks"]))
@@ -761,6 +787,9 @@ def evaluate_checkpoint(config, checkpoint, output_dir):
             restore_training=False,
         )
         callback.init_callback(model)
+        if config.get('planning_enabled'):
+            from dataclasses import asdict
+            _atomic_json(callback.root / 'planning_search.json', asdict(model.search_settings))
         callback.num_timesteps = model.num_timesteps
         callback.checkpoint_identity = identity
         try:
@@ -782,10 +811,18 @@ def main(argv=None):
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", choices=("cpu", "mps"))
+    parser.add_argument('--search-budget', type=int, help='planning learner budget; zero disables search')
+    parser.add_argument('--search-depth', type=int, help='planning learner maximum depth')
     args = parser.parse_args(argv)
     config = json.loads(args.config.read_text())
     if args.device:
         config["device"] = args.device
+    for key in ('budget', 'depth'):
+        value = getattr(args, f'search_{key}')
+        if value is not None:
+            if not config.get('planning_enabled'):
+                parser.error('search overrides require a planning checkpoint')
+            config[f'evaluation_search_{key}'] = value
     result = evaluate_checkpoint(config, args.checkpoint, args.output_dir)
     return 0 if result["latest"]["valid"] else 2
 

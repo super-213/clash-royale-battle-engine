@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import copy
 import json
 import math
 import shutil
@@ -93,6 +94,7 @@ class SelfPlayOpponentPool:
         self._retired_snapshots = {}
         self.assignments = {}
         self._loaded_models = OrderedDict()
+        self._prediction_rngs = {}
         self.ratings = {"random": 800.0, "current": 1000.0}
         self.aggregate = {"games": 0, "wins": 0, "losses": 0, "draws": 0}
         self.recent_results = deque(maxlen=100)
@@ -131,6 +133,7 @@ class SelfPlayOpponentPool:
             if self._assigned(snapshot_id):
                 continue
             self._loaded_models.pop(snapshot_id, None)
+            self._prediction_rngs.pop(snapshot_id, None)
             self.ratings.pop(snapshot_id, None)
             path = Path(entry["path"])
             if path.is_relative_to(self.snapshots_dir):
@@ -181,6 +184,7 @@ class SelfPlayOpponentPool:
         active_ids = {item["id"] for item in self._active_snapshots()}
         for loaded_id in list(self._loaded_models):
             if loaded_id not in active_ids and not self._assigned(loaded_id):
+                self._remember_prediction_rng(loaded_id, self._loaded_models[loaded_id])
                 del self._loaded_models[loaded_id]
         self._empty_mps_cache()
         self._persist()
@@ -258,6 +262,8 @@ class SelfPlayOpponentPool:
         if entry.get("sha256") is not None and _sha256(entry["path"]) != entry["sha256"]:
             raise ValueError(f"historical snapshot changed: {snapshot_id}")
         model = load_inference_model(self.algorithm_class, entry["path"], self.device)
+        if snapshot_id in self._prediction_rngs and isinstance(getattr(model, 'rng', None), np.random.Generator):
+            model.rng.bit_generator.state = copy.deepcopy(self._prediction_rngs[snapshot_id])
         self._loaded_models[snapshot_id] = model
         while len(self._loaded_models) > self.loaded_model_limit:
             removable = next(
@@ -269,9 +275,14 @@ class SelfPlayOpponentPool:
             )
             if removable is None:
                 break
+            self._remember_prediction_rng(removable, self._loaded_models[removable])
             del self._loaded_models[removable]
         self._empty_mps_cache()
         return model
+
+    def _remember_prediction_rng(self, snapshot_id, model):
+        if isinstance(getattr(model, 'rng', None), np.random.Generator):
+            self._prediction_rngs[snapshot_id] = copy.deepcopy(model.rng.bit_generator.state)
 
     def predict(self, observations, deterministic=False):
         count = int(next(iter(observations.values())).shape[0])
@@ -442,6 +453,8 @@ class SelfPlayOpponentPool:
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         snapshots = []
+        for snapshot_id, model in self._loaded_models.items():
+            self._remember_prediction_rng(snapshot_id, model)
         for entry in self.snapshots:
             filename = f"{entry['id']}.zip"
             digest = _sha256(entry["path"])
@@ -455,6 +468,8 @@ class SelfPlayOpponentPool:
             "aggregate": self.aggregate, "recent_results": list(self.recent_results),
             "matchups": [[*key, value] for key, value in self.matchups.items()],
             "rng": self.rng.bit_generator.state,
+            'prediction_rngs': {entry['id']: self._prediction_rngs[entry['id']] for entry in snapshots
+                                if entry['id'] in self._prediction_rngs},
         })
 
     def restore_state(self, directory):
@@ -490,6 +505,9 @@ class SelfPlayOpponentPool:
         self.matchups.update({(learner, opponent): values
                              for learner, opponent, values in saved["matchups"]})
         self.rng.bit_generator.state = saved["rng"]
+        self._prediction_rngs = saved.get('prediction_rngs', {})
+        if self._prediction_rngs.keys() - snapshot_ids:
+            raise ValueError('resume prediction RNG belongs to an unknown snapshot')
         # Native episodes cannot be restored: resumed slots start new games.
         self.assignments.clear()
         self._persist()

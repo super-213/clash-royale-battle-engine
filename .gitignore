@@ -18,6 +18,8 @@ __pycache__/
 /artifacts/training_runs/
 /artifacts/experiments/
 /artifacts/emulator/
+/artifacts/planning_runs/
+/artifacts/planning_native_*/
 
 # Large binary files
 *.apk

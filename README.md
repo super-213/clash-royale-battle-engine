@@ -23,6 +23,10 @@ Actor/Critic LSTM hidden state 跨决策持续传递，单场结束时只重置�
 标签加入推理观测。默认 v6 还将实际成功执行的卡牌与落点加入动力学辅助预测，
 当前对手信息推断保持纯状态输入；旧 v5 类保留用于加载、续训和消融。
 
+另提供实验性的 `native_planning` profile：可连续推进的随机空间世界模型、双方联合动作
+的多步搜索、序列回放与搜索引导训练。通过 `./train.sh --profile native_planning` 选择，
+默认 PPO 不变；实现、训练和验证方法见 [PLANNING.md](PLANNING.md)。
+
 `train_native.py` 与一键入口共用默认 v6 profile、训练日志、自博弈和固定评估流程。
 默认使用 M5 Pro 的 `mps` GPU；MPS 不可用时立即报错。两个入口均支持 `--resume`，
 恢复模型、优化器、历史对手池、评级和 RNG；续训从新对局开始。操作见 [TRAINING.md](TRAINING.md)。

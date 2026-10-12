@@ -6,7 +6,7 @@ import torch
 from pathlib import Path
 
 from one_click_train import load_profiles, prepare_config, validate_config, ensure_engine
-from training_runtime import require_training_device, run_sb3_training, resume_directory, _atomic_json
+from training_runtime import require_training_device, resume_directory, _atomic_json, load_object
 
 
 def main(argv=None):
@@ -58,7 +58,7 @@ def main(argv=None):
         print(json.dumps(config, indent=2))
         return 0
     ensure_engine(config)
-    run_sb3_training(config, args.output)
+    load_object(config['trainer'])(config, args.output)
     return 0
 
 
