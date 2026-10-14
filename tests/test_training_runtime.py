@@ -147,7 +147,7 @@ class TrainingRuntimeTest(unittest.TestCase):
             latest = json.loads((Path(directory) / "latest.json").read_text())
             self.assertEqual(
                 config["policy"],
-                "native_engine.native_recurrent_model:NativeActionConditionedWorldModelRecurrentPolicy",
+                "native_engine.native_recurrent_model:NativeRoleAwareActionConditionedWorldModelRecurrentPolicy",
             )
             self.assertEqual(
                 config["algorithm"],

@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from stable_baselines3.common.callbacks import BaseCallback
-from policy_contracts import validated_actions
+from policy_contracts import validated_actions, observations_for_policy
 
 
 EVALUATION_COLUMNS = (
@@ -161,7 +161,7 @@ class FixedPolicyOpponent:
             [slot["episode_start"] for slot in slots], dtype=bool
         )
         actions, next_state = self.model.predict(
-            observations,
+            observations_for_policy(self.model, observations),
             state=state,
             episode_start=episode_start,
             deterministic=True,

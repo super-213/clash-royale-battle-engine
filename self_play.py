@@ -15,7 +15,7 @@ import numpy as np
 import torch
 from stable_baselines3.common.callbacks import BaseCallback
 from training_runtime import load_inference_model, _sha256, completed_update_at_training_end
-from policy_contracts import validated_actions
+from policy_contracts import validated_actions, observations_for_policy
 
 
 def _timestamp():
@@ -336,7 +336,7 @@ class SelfPlayOpponentPool:
                 dtype=bool,
             )
             predicted, next_state = model.predict(
-                    self._slice_observations(observations, indices),
+                    observations_for_policy(model, self._slice_observations(observations, indices)),
                     state=state,
                     episode_start=episode_starts,
                     deterministic=bool(deterministic),

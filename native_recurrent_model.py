@@ -28,6 +28,7 @@ from .native_model import (
 from .native_cross_modal import CrossModalActionHead, NativeCrossModalExtractor
 from .native_spatial_model import (
     NativeSpatialHeatmapExtractor,
+    NativeRoleAwareSpatialHeatmapExtractor,
     SpatialHeatmapActionHead,
 )
 from .native_world_model import (
@@ -909,7 +910,38 @@ class NativeActionConditionedWorldModelRecurrentPolicy(NativeWorldModelRecurrent
         )
 
 
+class NativeRoleAwareSpatialHeatmapRecurrentPolicy(NativeSpatialHeatmapRecurrentPolicy):
+    """Role-aware spatial policy without auxiliary dynamics, for ablations."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("features_extractor_class", NativeRoleAwareSpatialHeatmapExtractor)
+        super().__init__(*args, **kwargs)
+        self.features_extractor.architecture_version = "role_aware_spatial_stateful_v7"
+
+
+class NativeRoleAwareWorldModelRecurrentPolicy(NativeWorldModelRecurrentPolicy):
+    """Role-aware state-only auxiliary policy, for matched ablations."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("features_extractor_class", NativeRoleAwareSpatialHeatmapExtractor)
+        super().__init__(*args, **kwargs)
+        self.features_extractor.architecture_version = "role_aware_world_model_stateful_v7"
+
+
+class NativeRoleAwareActionConditionedWorldModelRecurrentPolicy(NativeRoleAwareWorldModelRecurrentPolicy):
+    """v7 default: role-aware hand and action-conditioned auxiliary dynamics."""
+
+    action_conditioned = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.features_extractor.architecture_version = "role_aware_action_conditioned_world_model_stateful_v7"
+
+
 __all__ = [
+    "NativeRoleAwareSpatialHeatmapRecurrentPolicy",
+    "NativeRoleAwareWorldModelRecurrentPolicy",
+    "NativeRoleAwareActionConditionedWorldModelRecurrentPolicy",
     "NativeRecurrentMaskedPolicy",
     "NativeCrossModalRecurrentPolicy",
     "NativeSpatialHeatmapRecurrentPolicy",

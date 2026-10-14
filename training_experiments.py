@@ -45,17 +45,21 @@ def variant_config(base, variant):
     if not all(config.get(key) for key in (
         "recurrent_enabled", "cross_modal_enabled", "spatial_heatmap_enabled", "world_model_enabled",
     )) or not config["algorithm"].endswith(":NativeActionConditionedWorldModelPPO"):
-        raise ValueError("ablation suite requires the v6 world-model profile")
+        raise ValueError("ablation suite requires an action-conditioned world-model profile")
     if variant == "no_aux":
         # Retain every parameter and its initialization, removing only auxiliary gradients.
         config["auxiliary_coef"] = 0.0
     elif variant == "state_only":
         config["algorithm"] = module + "NativeWorldModelPPO"
-        config["policy"] = module + "NativeWorldModelRecurrentPolicy"
+        config["policy"] = module + (
+            "NativeRoleAwareWorldModelRecurrentPolicy" if "RoleAware" in base["policy"]
+            else "NativeWorldModelRecurrentPolicy")
     elif variant == "v4":
         config["world_model_enabled"] = False
         config["algorithm"] = module + "NativeRecurrentPPO"
-        config["policy"] = module + "NativeSpatialHeatmapRecurrentPolicy"
+        config["policy"] = module + (
+            "NativeRoleAwareSpatialHeatmapRecurrentPolicy" if "RoleAware" in base["policy"]
+            else "NativeSpatialHeatmapRecurrentPolicy")
     elif variant.startswith("drop_"):
         config["auxiliary_weights"][variant.removeprefix("drop_")] = 0.0
     return config

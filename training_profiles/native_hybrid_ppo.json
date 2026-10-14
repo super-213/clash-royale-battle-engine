@@ -1,10 +1,10 @@
 {
-  "name": "Native Action-Conditioned World-Model PPO",
-  "description": "PPO + recurrent spatial heatmaps + executed-card/placement-conditioned auxiliary dynamics",
+  "name": "Native Role-Aware World-Model PPO v7",
+  "description": "PPO + separate current/next-card roles + spatial combat counts and total HP + action-conditioned auxiliary dynamics",
   "trainer": "training_runtime:run_sb3_training",
   "environment": "native_engine.native_vec_env:NativeBatchVecEnv",
   "algorithm": "native_engine.native_recurrent_model:NativeActionConditionedWorldModelPPO",
-  "policy": "native_engine.native_recurrent_model:NativeActionConditionedWorldModelRecurrentPolicy",
+  "policy": "native_engine.native_recurrent_model:NativeRoleAwareActionConditionedWorldModelRecurrentPolicy",
   "defaults": {
     "rounds": 10,
     "rollout_decisions": 8192,
@@ -63,7 +63,8 @@
     "evaluation_opponents": ["random", "initial_policy"]
   },
   "environment_kwargs": {
-    "learner_roles": "alternating"
+    "learner_roles": "alternating",
+    "observation_schema": "native_model_v4"
   },
   "algorithm_kwargs": {}
 }

@@ -60,7 +60,8 @@ class TrainingFixesTest(unittest.TestCase):
             self.assertIsNone(light.rollout_buffer)
             self.assertFalse(light.policy.optimizer.state)
             self.assertTrue(original.policy.optimizer.state)
-            env = NativeBatchVecEnv(battles=2, batch_factory=lambda **kw: FakeBatch(2))
+            env = NativeBatchVecEnv(battles=2, batch_factory=lambda **kw: FakeBatch(2),
+                observation_schema=original.policy.features_extractor.observation_schema)
             try:
                 observation = env.reset()
                 original_state = light_state = None
@@ -432,7 +433,8 @@ class TrainingFixesTest(unittest.TestCase):
         from sb3_contrib import RecurrentPPO
         from training_experiments import variant_config
         from native_engine.native_recurrent_model import (
-            NativeRecurrentPPO, NativeActionConditionedWorldModelRecurrentPolicy,
+            NativeRecurrentPPO,
+            NativeRoleAwareActionConditionedWorldModelRecurrentPolicy as NativeActionConditionedWorldModelRecurrentPolicy,
         )
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -453,7 +455,7 @@ class TrainingFixesTest(unittest.TestCase):
                 self.assertNotIn(parameter, skipped.policy.optimizer.state)
 
     def test_all_zero_auxiliary_weights_skip_predictions(self):
-        from native_engine.native_recurrent_model import NativeActionConditionedWorldModelRecurrentPolicy
+        from native_engine.native_recurrent_model import NativeRoleAwareActionConditionedWorldModelRecurrentPolicy as NativeActionConditionedWorldModelRecurrentPolicy
         with TemporaryDirectory() as directory:
             config = self.config()
             config.update(rounds=1, auxiliary_weights={
@@ -954,7 +956,8 @@ class TrainingFixesTest(unittest.TestCase):
                     observation, rewards, dones, infos = super().step_wait()
                     infos[0]['entity_target_schema'] = 'wrong'
                     return observation, rewards, dones, infos
-            env = WrongSchemaEnv(battles=2, batch_factory=lambda **kw: TerminalBatch(2))
+            env = WrongSchemaEnv(battles=2, batch_factory=lambda **kw: TerminalBatch(2),
+                observation_schema=config['environment_kwargs']['observation_schema'])
             with patch('auxiliary_validation.load_object', return_value=lambda **kw: env):
                 with self.assertRaisesRegex(ValueError, 'incompatible entity_target_schema'):
                     collect_dataset(config, model, root / 'bad_collection.npz', seed_count=2, decisions=4, battles=2)

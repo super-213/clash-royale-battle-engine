@@ -48,7 +48,10 @@ class NativeCrossModalExtractor(BaseFeaturesExtractor):
         if cross_dim % attention_heads:
             raise ValueError("cross_dim must be divisible by attention_heads")
         self.battle_backend = "native_batch_v1"
-        self.observation_schema = "native_model_v3"
+        self.observation_schema = (
+            "native_model_v4" if observation_space["spatial"].shape[0] == 20
+            else "native_model_v3"
+        )
         self.architecture_version = "cross_modal_stateful_v3"
         self.cross_dim = int(cross_dim)
 
@@ -229,7 +232,7 @@ class NativeCrossModalExtractor(BaseFeaturesExtractor):
     ):
         hand = observations["hand"].long()
         valid = hand > 0
-        queries = self.card_embedding(hand)
+        queries = self._card_queries(hand)
         context = torch.cat((
             entity_tokens,
             history.unsqueeze(1),
@@ -247,6 +250,13 @@ class NativeCrossModalExtractor(BaseFeaturesExtractor):
             need_weights=False,
         )
         return self.card_norm(queries + attended) * valid.unsqueeze(-1)
+
+    def _card_queries(self, hand):
+        return self.card_embedding(hand)
+
+    def _card_summary(self, cards, hand):
+        valid = (hand > 0).unsqueeze(-1)
+        return cards.sum(dim=1) / valid.sum(dim=1).clamp_min(1)
 
     def _spatial_context(self, observations):
         feature_map = self.spatial_backbone(observations["spatial"])
@@ -291,8 +301,7 @@ class NativeCrossModalExtractor(BaseFeaturesExtractor):
         self._action_placement_tokens = placements
         self._auxiliary_entity_tokens = entities
         self._auxiliary_entity_mask = entity_valid
-        hand_valid = (observations["hand"] > 0).unsqueeze(-1)
-        card_summary = cards.sum(dim=1) / hand_valid.sum(dim=1).clamp_min(1)
+        card_summary = self._card_summary(cards, observations["hand"])
         return self.fusion(torch.cat((
             spatial,
             entity_summary,

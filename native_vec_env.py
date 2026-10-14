@@ -30,7 +30,7 @@ from gymnasium import spaces
 import numpy as np
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.vec_env import VecEnv
-from policy_contracts import validated_actions
+from policy_contracts import validated_actions, observations_for_policy
 
 from .batch import Batch
 from .engine import Play
@@ -39,6 +39,8 @@ from .engine import Play
 ARENA_HEIGHT = 32
 ARENA_WIDTH = 18
 SPATIAL_CHANNELS = 16
+AGGREGATE_SPATIAL_CHANNELS = 20
+SPATIAL_HP_SCALE = 10_000.0
 MAX_ENTITIES = 128
 ENTITY_FEATURES = 24
 HISTORY_LENGTH = 32
@@ -101,13 +103,17 @@ def _executed_action_features(owner, plays, receipts, events):
     return features
 
 
-def native_observation_space() -> spaces.Dict:
-    """Return the version-1 native training observation contract."""
+def native_observation_space(observation_schema="native_model_v3") -> spaces.Dict:
+    """Return the selected public training observation contract."""
+    channels = {"native_model_v3": SPATIAL_CHANNELS,
+                "native_model_v4": AGGREGATE_SPATIAL_CHANNELS}.get(observation_schema)
+    if channels is None:
+        raise ValueError(f"unsupported observation schema: {observation_schema}")
     return spaces.Dict({
         "spatial": spaces.Box(
             low=0.0,
             high=1.0,
-            shape=(SPATIAL_CHANNELS, ARENA_HEIGHT, ARENA_WIDTH),
+            shape=(channels, ARENA_HEIGHT, ARENA_WIDTH),
             dtype=np.float32,
         ),
         "entities": spaces.Box(
@@ -381,6 +387,7 @@ class NativeBatchVecEnv(VecEnv):
         opponent_policy: Any = None,
         batch_factory: Callable[..., Any] | None = None,
         planning_labels: bool = False,
+        observation_schema: str = "native_model_v3",
     ):
         if not 1 <= int(battles) <= 16:
             raise ValueError("battles must be between 1 and 16")
@@ -392,6 +399,7 @@ class NativeBatchVecEnv(VecEnv):
         self.base_seed = int(seed)
         self.opponent_policy = opponent_policy
         self.planning_labels = bool(planning_labels)
+        self.observation_schema = observation_schema
         self._opponent_state = None
         self._opponent_episode_starts = np.ones(self.battles, dtype=bool)
         self._batch_factory = batch_factory or Batch
@@ -408,7 +416,7 @@ class NativeBatchVecEnv(VecEnv):
         self.slots = [_Slot(index=index) for index in range(self.battles)]
         super().__init__(
             self.battles,
-            native_observation_space(),
+            native_observation_space(observation_schema),
             spaces.MultiDiscrete([5, ARENA_HEIGHT, ARENA_WIDTH]),
         )
         self.seed(self.base_seed)
@@ -699,7 +707,7 @@ class NativeBatchVecEnv(VecEnv):
                 # A directly supplied recurrent SB3 model needs the same
                 # per-slot memory/reset contract as our league wrappers.
                 actions, next_state = policy.predict(
-                    batched, state=self._opponent_state,
+                    observations_for_policy(policy, batched), state=self._opponent_state,
                     episode_start=self._opponent_episode_starts,
                     deterministic=False,
                 )
@@ -908,7 +916,7 @@ class NativeBatchVecEnv(VecEnv):
         owner = slot.learner_owner if owner is None else int(owner)
         state = slot.state
         spatial = np.zeros(
-            (SPATIAL_CHANNELS, ARENA_HEIGHT, ARENA_WIDTH), dtype=np.float32
+            self.observation_space["spatial"].shape, dtype=np.float32
         )
         entities = np.zeros((MAX_ENTITIES, ENTITY_FEATURES), dtype=np.float32)
         entity_mask = np.zeros(MAX_ENTITIES, dtype=np.float32)
@@ -929,6 +937,11 @@ class NativeBatchVecEnv(VecEnv):
                 entity.entity_type, 0
             )
             side = 1 if enemy else 0
+            if self.observation_schema == "native_model_v4" and kind != 2:
+                # Sum over ALL public combat entities, including rows beyond
+                # the Transformer cap. Clip only after completing aggregation.
+                spatial[16 + side, cell_y, cell_x] += 1.0 / MAX_ENTITIES
+                spatial[18 + side, cell_y, cell_x] += hp / SPATIAL_HP_SCALE
             spatial[side, cell_y, cell_x] = 1.0
             spatial[2 + side, cell_y, cell_x] = max(
                 spatial[2 + side, cell_y, cell_x], hp_ratio
@@ -975,6 +988,8 @@ class NativeBatchVecEnv(VecEnv):
             token[23] = float(bool(entity.is_spell))
             entity_mask[row] = 1.0
 
+        if self.observation_schema == "native_model_v4":
+            np.clip(spatial[16:], 0.0, 1.0, out=spatial[16:])
         player = state.players[owner]
         hand_cards = [CARD_TOKENS.get(int(card.card), 0) for card in player.hand[:4]]
         hand_cards.extend([0] * (4 - len(hand_cards)))

@@ -29,12 +29,15 @@ conda run -n clash-royale python -m pip install -r requirements-training.txt
 CLASH_TRAIN_CONDA_ENV=my-env ./train.sh
 ```
 
-默认 `native_hybrid_ppo` profile 使用 v6 动作条件世界模型：动力学辅助预测读取实际
+默认 `native_hybrid_ppo` profile 使用 v7 角色感知动作条件世界模型：动力学辅助预测读取实际
 成功出牌的卡牌身份和己方视角落点，当前对手信息推断仍只读取状态。动作编码仅进入
-辅助训练通道，不改变 policy observation、Actor/Critic 输入或动作掩码。
+辅助训练通道，不进入推理观测。v7 为当前手牌和下一张牌加入不同角色编码，并将
+四张当前手牌与下一张牌分别汇总；Actor/Critic 因此能区分两者。
+默认环境使用20通道 `native_model_v4`，追加双方同格战斗实体数量和总血量。
 `summary.json` / `summary.md` 记录架构及 `executed_card_xy_v1` 编码版本。
-旧 v5 的 `NativeWorldModelPPO` / `NativeWorldModelRecurrentPolicy` 类保留，可以按
-原架构加载和续训旧 checkpoint；新 v6 使用独立类，不会自动将旧 checkpoint 升级。
+旧 v5/v6 模型类与16通道 `native_model_v3` 环境保留，可以按原配置加载和续训旧
+checkpoint。v7 使用新的 policy 类，不自动转换旧权重；旧检查点续训应使用
+`--resume` 读取其保存的配置。固定评估中的旧对手只接收新观测的原16通道。
 
 一次“训练轮次”表示一次完整 rollout 加一次 PPO 更新。默认每轮有 8,192 个
 learner decisions，由 16 路原生 `VecEnv` 并行收集。交互流程会询问：
@@ -181,10 +184,10 @@ learner decisions 计算，必须是 `rollout_decisions` 的整数倍；评估�
 
 | 组名 | 改动 | 比较目的 |
 |---|---|---|
-| `full` | 默认 v6 | 动作条件辅助世界模型 |
-| `no_aux` | v6 的 `auxiliary_coef=0` | 保留全部参数和同种子初始化，隔离辅助梯度的收益 |
-| `state_only` | v5 policy/algorithm | 辅助任务只读取状态，隔离动作条件的收益 |
-| `v4` | 空间动作头，无世界模型 | 无辅助头的架构基线，参数量单独报告 |
+| `full` | 默认 v7 | 角色感知动作条件辅助世界模型 |
+| `no_aux` | v7 的 `auxiliary_coef=0` | 保留全部参数和同种子初始化，隔离辅助梯度的收益 |
+| `state_only` | 同一角色感知编码器，状态条件辅助头 | 辅助任务只读取状态，隔离动作条件的收益 |
+| `v4` | 同一角色感知编码器，无世界模型 | 沿用组名；无辅助头的架构基线，参数量单独报告 |
 
 `--all-variants` 额外加入八个 `drop_<task>` 单任务消融，每次只将对应权重置零：
 `tower_delta`、`entity_death`、`entity_position`、`damage_source`、`opponent_elixir`、
@@ -287,7 +290,7 @@ conda run -n clash-royale python fixed_evaluation.py \
 
 ## 直接入口与续训
 
-直接入口默认使用同一个 v6 profile，`--output` 现在表示新运行目录：
+直接入口默认使用同一个 v7 profile，`--output` 现在表示新运行目录：
 
 ```bash
 conda run -n clash-royale python train_native.py --rounds 10 --output artifacts/native_training_v6
@@ -336,7 +339,7 @@ Python、训练配置、依赖约束和原生 probe 源码。计划须使用修�
 rollout 不能单独证明更新完成。回调提前停止也不能把未完成更新的模型标记为完整训练。
 该判断同时用于自博弈快照、最终固定评估和训练指标；中断摘要中的 `completed_rounds`
 只计已经完成的 PPO 更新，`timesteps` 仍保留实际采样数。提前停止不执行待运行的延迟评估。
-v4、v5、v6 共用 PPO 更新循环，只有有效样本数大于一时才归一化 advantage；直接 Python
+v4、v5、v6、v7 共用 PPO 更新循环，只有有效样本数大于一时才归一化 advantage；直接 Python
 调用产生的单样本 minibatch 不会因无偏标准差而污染参数。普通 v4 批次与上游更新保持一致。
 
 learner 与对手动作在转换为 `int64` 前检查形状、整数性、有限值和表示范围；小数、布尔值、
@@ -394,7 +397,8 @@ conda run -n clash-royale python auxiliary_validation.py evaluate \
 采集端核验环境返回的标签 schema 和数值范围后才写入数据文件，独占创建文件以防覆盖。
 评分核验辅助头输出形状及有限值，拒绝 NaN／Inf 指标；下一张牌目标与训练采用相同的
 概率归一化方式。
-支持 v5/v6，v4 没有辅助头，不参与辅助预测评分。输出塔血/位移/短期指标 MAE、实体
+支持 v5/v6/v7；同一数据文件只比较相同 observation schema 的模型。v4 没有辅助头，
+不参与辅助预测评分。输出塔血/位移/短期指标 MAE、实体
 消失 BCE/准确率、伤害结果准确率，以及公开圣水/卡序重构指标和有效标签数。
 
 这些是公开动力学与规则信念重构验证，不包含真实隐藏手牌或真实 attacker ID；不能

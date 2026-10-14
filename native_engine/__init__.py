@@ -33,6 +33,9 @@ def __getattr__(name):
             "NativeHybridMaskedPolicy": NativeHybridMaskedPolicy,
         }[name]
     if name in (
+        "NativeRoleAwareSpatialHeatmapRecurrentPolicy",
+        "NativeRoleAwareWorldModelRecurrentPolicy",
+        "NativeRoleAwareActionConditionedWorldModelRecurrentPolicy",
         "NativeCrossModalExtractor",
         "NativeCrossModalRecurrentPolicy",
         "NativeSpatialHeatmapExtractor",
@@ -47,6 +50,9 @@ def __getattr__(name):
         from .native_cross_modal import NativeCrossModalExtractor
         from .native_spatial_model import NativeSpatialHeatmapExtractor
         from .native_recurrent_model import (
+            NativeRoleAwareSpatialHeatmapRecurrentPolicy,
+            NativeRoleAwareWorldModelRecurrentPolicy,
+            NativeRoleAwareActionConditionedWorldModelRecurrentPolicy,
             NativeCrossModalRecurrentPolicy,
             NativeRecurrentMaskedPolicy,
             NativeRecurrentPPO,
@@ -57,6 +63,9 @@ def __getattr__(name):
             NativeActionConditionedWorldModelRecurrentPolicy,
         )
         return {
+            "NativeRoleAwareSpatialHeatmapRecurrentPolicy": NativeRoleAwareSpatialHeatmapRecurrentPolicy,
+            "NativeRoleAwareWorldModelRecurrentPolicy": NativeRoleAwareWorldModelRecurrentPolicy,
+            "NativeRoleAwareActionConditionedWorldModelRecurrentPolicy": NativeRoleAwareActionConditionedWorldModelRecurrentPolicy,
             "NativeCrossModalExtractor": NativeCrossModalExtractor,
             "NativeCrossModalRecurrentPolicy": NativeCrossModalRecurrentPolicy,
             "NativeSpatialHeatmapExtractor": NativeSpatialHeatmapExtractor,
@@ -74,6 +83,9 @@ def __getattr__(name):
 
 
 __all__ = [
+    "NativeRoleAwareSpatialHeatmapRecurrentPolicy",
+    "NativeRoleAwareWorldModelRecurrentPolicy",
+    "NativeRoleAwareActionConditionedWorldModelRecurrentPolicy",
     "ActionReceipt",
     "Batch",
     "Engine",

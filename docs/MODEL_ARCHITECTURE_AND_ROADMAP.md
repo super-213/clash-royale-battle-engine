@@ -10,7 +10,7 @@
 - 16 路原生 `NativeBatchVecEnv`；
 - Stable-Baselines3 PPO；
 - Apple Silicon MPS 训练；
-- `native_model_v3` observation schema（沿用 v2 形状，空间遍历与聚合已修复）；
+- 默认 `native_model_v4` observation schema（20通道空间图，原16通道保留）；
 - Cross-attention + Entity Transformer + LSTM 混合策略网络；
 - 分层、带合法性掩码的动作分布。
 
@@ -24,6 +24,11 @@
 - [`native_vec_env.py`](../native_vec_env.py)
 - [`training_runtime.py`](../training_runtime.py)
 - [`training_profiles/native_hybrid_ppo.json`](../training_profiles/native_hybrid_ppo.json)
+
+2026-10-14：默认 v7 修复手牌角色混淆，当前四张手牌和下一张牌分别汇总，并加入
+两种角色 embedding；空间图增加双方战斗实体数量和总血量通道。
+旧 v3–v6 policy 类保留原手牌汇总方式用于旧权重兼容。下文演进记录中的16通道及
+旧模型版本描述保留为历史信息；当前默认输入与兼容方式以 `VEC_ENV.md` 为准。
 
 ## 2. 当前模型总体结构
 

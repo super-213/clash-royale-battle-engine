@@ -3,6 +3,23 @@
 import numpy as np
 
 
+def observations_for_policy(model, observations):
+    """Expose the unchanged v3 prefix to legacy opponents in a v4 match.
+
+    Never manufacture the aggregate channels for a newer model: those must
+    come from the actual public entities in the environment.
+    """
+    space = getattr(model, "observation_space", None)
+    if (space is None or not hasattr(space, "spaces")
+            or "spatial" not in space.spaces or "spatial" not in observations):
+        return observations
+    expected = space["spatial"].shape
+    spatial = observations["spatial"]
+    if expected == (16, 32, 18) and spatial.shape[-3:] == (20, 32, 18):
+        return dict(observations, spatial=spatial[..., :16, :, :])
+    return observations
+
+
 def validated_actions(actions, count, label="policy"):
     values = np.asarray(actions)
     if values.shape != (count, 3):

@@ -74,6 +74,26 @@ class NativeSpatialHeatmapExtractor(NativeCrossModalExtractor):
         return spatial_tokens.mean(dim=1), spatial_tokens
 
 
+class NativeRoleAwareSpatialHeatmapExtractor(NativeSpatialHeatmapExtractor):
+    """v7: distinguish playable cards from the next draw in every branch."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.card_role_embedding = nn.Embedding(2, self.cross_dim)
+        self.register_buffer("card_roles", torch.tensor([0, 0, 0, 0, 1]),
+                             persistent=False)
+        self.fusion[0] = nn.Linear(self.cross_dim * 6 + 64, self.features_dim)
+        self.architecture_version = "role_aware_spatial_stateful_v7"
+
+    def _card_queries(self, hand):
+        return self.card_embedding(hand) + self.card_role_embedding(self.card_roles).unsqueeze(0)
+
+    def _card_summary(self, cards, hand):
+        valid = (hand[:, :4] > 0).unsqueeze(-1)
+        current = cards[:, :4].sum(dim=1) / valid.sum(dim=1).clamp_min(1)
+        return torch.cat((current, cards[:, 4]), dim=-1)
+
+
 class SpatialHeatmapActionHead(nn.Module):
     """Implement P(card) then P(tile | card, full-resolution CNN map)."""
 
@@ -114,4 +134,4 @@ class SpatialHeatmapActionHead(nn.Module):
         return self._last_heatmaps
 
 
-__all__ = ["NativeSpatialHeatmapExtractor", "SpatialHeatmapActionHead"]
+__all__ = ["NativeSpatialHeatmapExtractor", "NativeRoleAwareSpatialHeatmapExtractor", "SpatialHeatmapActionHead"]

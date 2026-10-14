@@ -47,11 +47,11 @@ training code. `env_method("action_masks")` returns one mask per selected slot.
 When the opponent is an SB3-style model, all 16 opponent observations are sent
 through one batched `predict` call rather than 16 sequential model forwards.
 
-## Model-facing observation (`native_model_v3`)
+## Model-facing observation (`native_model_v4`, legacy `native_model_v3`)
 
 | Key | Shape | Intended encoder |
 |---|---:|---|
-| `spatial` | `16 x 32 x 18` | CNN arena encoder |
+| `spatial` | `20 x 32 x 18` (v4), `16 x 32 x 18` (v3) | CNN arena encoder |
 | `entities` | `128 x 24` | entity Transformer |
 | `entity_mask` | `128` | Transformer padding mask |
 | `hand` | `5` | card embeddings (hand + next card) |
@@ -73,6 +73,15 @@ while only the ID-sorted entity tokens are capped at 128. Same-cell target flags
 use maximum aggregation. Training records entity truncation rate. Old weights
 can load because parameter shapes match, but further training is needed and
 evaluations across schema versions must not be pooled.
+
+Version 4 appends four channels without changing the original 16: own/enemy
+combat entity counts (channels 16/17, divided by 128), and own/enemy total HP
+(channels 18/19, divided by 10,000). Buildings and troops contribute; projectiles
+do not. Aggregation includes entities beyond the token cap and is clipped to
+[0, 1] after summation. The default v7 training profile selects
+`observation_schema="native_model_v4"`; direct `NativeBatchVecEnv()` retains v3
+for existing callers. Legacy opponents receive the exact original 16-channel
+prefix, while new models require the complete v4 observation.
 
 ## Usage
 

@@ -14,20 +14,25 @@ head 拆分；对应的可训练 PPO policy 也位于当前仓库。接口与验
 实体、历史和对手 belief，历史 token 会查询当前实体；CNN 始终保留原生 `32×18`
 空间 feature map，动作头让每张牌直接查询576个空间位置并生成独立热力图。随后
 Actor/Critic LSTM hidden state 跨决策持续传递，单场结束时只重置对应 VecEnv 槽位，
-并使用 sequence minibatch 和 truncated BPTT。`native_model_v3` 还提供塔血、圣水、
+并使用 sequence minibatch 和 truncated BPTT。`native_model_v4` 还提供塔血、圣水、
 单位生成/死亡、战斗血量、目标和出牌等逐决策变化特征。
 
 第六阶段的辅助世界模型也已接入默认 PPO：共享编码器会同时预测下一决策的塔血变化、
 实体死亡与位置、伤害来源类别、对手公开圣水区间、可能手牌/下一张牌，以及默认约
 2秒后的局面价值。辅助任务只增加训练 loss，不替代 PPO Actor/Critic，也不会把未来
-标签加入推理观测。默认 v6 还将实际成功执行的卡牌与落点加入动力学辅助预测，
-当前对手信息推断保持纯状态输入；旧 v5 类保留用于加载、续训和消融。
+标签加入推理观测。默认 v7 沿用 v6 的实际成功执行卡牌与落点条件化动力学辅助预测，
+当前对手信息推断保持纯状态输入；旧 v5/v6 类保留用于加载、续训和消融。
+
+默认 v7 将当前四张手牌与下一张牌分别汇总，并加入可学习的角色编码，避免 Critic
+把“现在可出”和“下一次抽到”混为一谈。`native_model_v4` 的空间输入扩为20通道：
+保留原16通道，追加双方同格战斗实体数量和总血量。旧检查点按原配置继续使用
+16通道 `native_model_v3`；固定评估和自博弈可把新观测的原16通道提供给旧对手。
 
 另提供实验性的 `native_planning` profile：可连续推进的随机空间世界模型、双方联合动作
 的多步搜索、序列回放与搜索引导训练。通过 `./train.sh --profile native_planning` 选择，
 默认 PPO 不变；实现、训练和验证方法见 [PLANNING.md](PLANNING.md)。
 
-`train_native.py` 与一键入口共用默认 v6 profile、训练日志、自博弈和固定评估流程。
+`train_native.py` 与一键入口共用默认 v7 profile、训练日志、自博弈和固定评估流程。
 默认使用 M5 Pro 的 `mps` GPU；MPS 不可用时立即报错。两个入口均支持 `--resume`，
 恢复模型、优化器、历史对手池、评级和 RNG；续训从新对局开始。操作见 [TRAINING.md](TRAINING.md)。
 
