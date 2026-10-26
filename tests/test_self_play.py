@@ -56,6 +56,60 @@ class SelfPlayOpponentPoolTest(unittest.TestCase):
     def setUp(self):
         FakeAlgorithm.loads.clear()
 
+    def test_staged_opponent_is_frozen_and_stage_results_exclude_old_games(self):
+        with TemporaryDirectory() as directory:
+            pool = SelfPlayOpponentPool(directory, FakeAlgorithm, "cpu", 2,
+                                        mode="staged", snapshot_pool_size=1)
+            live = FakePolicy()
+            pool.set_current_model(live)
+            initial = pool.snapshots_dir / "initial.zip"
+            initial.write_bytes(b"initial frozen weights")
+            pool.register_snapshot("initial", initial, 0)
+            for slot in (0, 1):
+                pool.on_episode_start(slot, 0, slot, slot)
+            live.action[:] = (0, 0, 0)
+            actions, _ = pool.predict(observations(2))
+            np.testing.assert_array_equal(actions, [[1, 7, 1], [1, 7, 1]])
+            self.assertFalse(live.calls)
+            pool.on_episode_end(0, winner=0, learner_role=0)
+            self.assertEqual(pool.metrics()["self_play/stage_win_rate_100"], 1.0)
+
+            newer = pool.snapshots_dir / "newer.zip"
+            newer.write_bytes(b"next frozen weights")
+            pool.register_snapshot("newer", newer, 200)
+            pool.ratings["initial"] = 5000
+            pool.begin_stage()
+            self.assertEqual(pool.metrics()["self_play/stage_games"], 0)
+            self.assertIsNone(pool.metrics()["self_play/stage_win_rate_100"])
+            # Finish an old game after switching: it must not inflate the new stage.
+            self.assertEqual(pool.assignments[1]["id"], "initial")
+            pool.on_episode_end(1, winner=1, learner_role=1)
+            self.assertEqual(pool.metrics()["self_play/stage_games"], 0)
+            for slot in (0, 1):
+                pool.on_episode_start(slot, 1, slot + 2, slot)
+                self.assertEqual(pool.assignments[slot]["id"], "newer")
+            pool.on_episode_end(0, winner=1, learner_role=0)
+            pool.on_episode_end(1, winner=None, learner_role=1)
+            self.assertEqual(pool.metrics()["self_play/stage_games"], 2)
+            self.assertEqual(pool.metrics()["self_play/stage_win_rate_100"], 0.0)
+            self.assertEqual(pool.metrics()["self_play/stage_score_rate_100"], 0.25)
+            self.assertEqual(pool.metrics()["self_play/games"], 4)
+            self.assertEqual([entry["id"] for entry in pool.snapshots], ["initial", "newer"])
+            self.assertTrue(initial.is_file())
+            self.assertEqual([entry["id"] for entry in pool._active_snapshots()], ["newer"])
+
+            saved = Path(directory) / "saved"
+            pool.save_state(saved)
+            restored = SelfPlayOpponentPool(Path(directory) / "resumed", FakeAlgorithm, "cpu", 2,
+                                            mode="staged")
+            restored.restore_state(saved)
+            restored.begin_stage()
+            self.assertEqual(restored.stage, pool.stage)
+            self.assertEqual(list(restored.stage_recent_results), [0.0, 0.5])
+            self.assertEqual(restored._choose_opponent()["id"], "newer")
+            pool.close()
+            restored.close()
+
     def test_historical_snapshot_identity_is_checked_on_load_save_and_resume(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

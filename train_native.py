@@ -23,6 +23,9 @@ def main(argv=None):
     parser.add_argument('--output', type=Path, default=Path('artifacts/native_training'))
     parser.add_argument('--resume', type=Path)
     parser.add_argument('--no-self-play', action='store_true')
+    parser.add_argument('--self-play-mode', choices=('staged', 'league'))
+    parser.add_argument('--self-play-snapshot-every-rounds', type=int,
+                        help='rounds per frozen-opponent stage (or snapshot interval in league mode)')
     parser.add_argument('--no-evaluation', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args(argv)
@@ -34,7 +37,8 @@ def main(argv=None):
         if profile is None:
             parser.error(f'unknown profile: {args.profile}')
         config = prepare_config(profile, defaults_only=True)
-    for field in ('port', 'evaluation_port', 'battles', 'decision_ticks', 'seed', 'device', 'rounds'):
+    for field in ('port', 'evaluation_port', 'battles', 'decision_ticks', 'seed', 'device', 'rounds',
+                  'self_play_mode', 'self_play_snapshot_every_rounds'):
         value = getattr(args, field)
         if value is not None:
             config[field] = value

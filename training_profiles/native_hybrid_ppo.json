@@ -46,10 +46,11 @@
       "future_value": 0.5
     },
     "self_play_enabled": true,
+    "self_play_mode": "staged",
     "self_play_random_ratio": 0.0,
     "self_play_current_ratio": 0.3,
     "self_play_historical_ratio": 0.7,
-    "self_play_snapshot_every_rounds": 5,
+    "self_play_snapshot_every_rounds": 100,
     "self_play_pool_size": 20,
     "self_play_active_historical": 4,
     "self_play_loaded_model_limit": 4,

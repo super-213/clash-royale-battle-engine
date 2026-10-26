@@ -1,4 +1,4 @@
-"""League-style self-play opponent pool for native vector training."""
+"""Staged frozen-opponent and mixed-league self-play for native training."""
 
 from __future__ import annotations
 
@@ -40,7 +40,8 @@ def _validate_snapshot_id(snapshot_id):
 class SelfPlayOpponentPool:
     """Assign one stable opponent per slot episode and track league results.
 
-    The pool mixes three opponent categories:
+    Staged mode uses only the newest immutable snapshot for new episodes and
+    keeps all stage snapshots. League mode mixes three opponent categories:
 
     * an optional legal random policy;
     * the live learner, used as a mirror opponent;
@@ -65,8 +66,13 @@ class SelfPlayOpponentPool:
         loaded_model_limit=4,
         elo_k=16.0,
         random_wait_probability=0.2,
+        mode="league",
     ):
+        if mode not in {"staged", "league"}:
+            raise ValueError("self-play mode must be staged or league")
+        self.mode = mode
         ratios = np.asarray(
+            (0.0, 0.0, 1.0) if mode == "staged" else
             (random_ratio, current_ratio, historical_ratio), dtype=np.float64
         )
         if np.any(ratios < 0) or not np.isclose(ratios.sum(), 1.0, atol=1e-6):
@@ -98,6 +104,8 @@ class SelfPlayOpponentPool:
         self.ratings = {"random": 800.0, "current": 1000.0}
         self.aggregate = {"games": 0, "wins": 0, "losses": 0, "draws": 0}
         self.recent_results = deque(maxlen=100)
+        self.stage = None
+        self.stage_recent_results = deque(maxlen=100)
         self.matchups = defaultdict(
             lambda: {"games": 0, "wins": 0, "losses": 0, "draws": 0}
         )
@@ -120,6 +128,8 @@ class SelfPlayOpponentPool:
         if not self.snapshots:
             return []
         newest = self.snapshots[-1]
+        if self.mode == "staged":
+            return [newest]
         strongest = sorted(
             self.snapshots[:-1],
             key=lambda item: (self.ratings[item["id"]], item["round"]),
@@ -145,6 +155,9 @@ class SelfPlayOpponentPool:
         return changed
 
     def _prune_snapshots(self):
+        # Stage boundaries are a durable model history, independent of Elo.
+        if self.mode == "staged":
+            return
         while len(self.snapshots) > self.snapshot_pool_size:
             # Keep the just-published policy as a fresh challenger. Among older
             # policies, prefer measured strength and break ties by recency.
@@ -192,7 +205,24 @@ class SelfPlayOpponentPool:
     def _assigned(self, opponent_id):
         return any(item["id"] == opponent_id for item in self.assignments.values())
 
+    def begin_stage(self):
+        if self.mode != "staged":
+            return
+        snapshot = self.snapshots[-1]
+        if self.stage is not None and self.stage["opponent_id"] == snapshot["id"]:
+            return
+        self.stage = {
+            "opponent_id": snapshot["id"], "opponent_round": snapshot["round"],
+            "games": 0, "wins": 0, "losses": 0, "draws": 0,
+        }
+        self.stage_recent_results.clear()
+        self._persist()
+        print(f"[self-play-stage] opponent={snapshot['id']} round={snapshot['round']}", flush=True)
+
     def _choose_opponent(self):
+        if self.mode == "staged":
+            self.begin_stage()
+            return {"id": self.stage["opponent_id"], "category": "historical"}
         available_history = self._active_snapshots()
         category_probabilities = self.ratios.copy()
         if self.current_model is None:
@@ -380,6 +410,13 @@ class SelfPlayOpponentPool:
         self.aggregate["games"] += 1
         self.aggregate[{"win": "wins", "loss": "losses", "draw": "draws"}[result]] += 1
         self.recent_results.append(score)
+        if self.mode == "staged" and self.stage is not None:
+            # Old games finish against their original opponent across a boundary.
+            # Their results belong only to the global totals, not the new stage.
+            if opponent_id == self.stage["opponent_id"]:
+                self.stage["games"] += 1
+                self.stage[{"win": "wins", "loss": "losses", "draw": "draws"}[result]] += 1
+                self.stage_recent_results.append(score)
         learner_id = f"learner_round_{self.learner_generation:06d}"
         matchup = self.matchups[(learner_id, opponent_id)]
         matchup["games"] += 1
@@ -398,6 +435,9 @@ class SelfPlayOpponentPool:
             "learner_elo": round(self.learner_elo, 3),
             "opponent_elo": round(self.ratings[opponent_id], 3),
         }
+        if self.stage is not None:
+            match["stage_opponent_id"] = self.stage["opponent_id"]
+            match["stage_opponent_round"] = self.stage["opponent_round"]
         with self.matches_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(match, ensure_ascii=False, sort_keys=True) + "\n")
         with self.ratings_path.open("a", newline="", encoding="utf-8") as stream:
@@ -421,7 +461,7 @@ class SelfPlayOpponentPool:
     def metrics(self):
         games = self.aggregate["games"]
         recent = list(self.recent_results)
-        return {
+        metrics = {
             "self_play/games": games,
             "self_play/wins": self.aggregate["wins"],
             "self_play/losses": self.aggregate["losses"],
@@ -435,10 +475,26 @@ class SelfPlayOpponentPool:
             "self_play/snapshot_count": len(self.snapshots),
             "self_play/active_historical": len(self._active_snapshots()),
         }
+        if self.stage is not None:
+            stage_games = self.stage["games"]
+            stage_recent = list(self.stage_recent_results)
+            metrics.update({
+                "self_play/stage_opponent_round": self.stage["opponent_round"],
+                "self_play/stage_games": stage_games,
+                "self_play/stage_win_rate": self.stage["wins"] / stage_games if stage_games else None,
+                "self_play/stage_win_rate_100": (
+                    sum(value == 1.0 for value in stage_recent) / len(stage_recent)
+                    if stage_recent else None
+                ),
+                "self_play/stage_score_rate_100": float(np.mean(stage_recent)) if stage_recent else None,
+            })
+        return metrics
 
     def summary(self):
         return {
             **self.metrics(),
+            "mode": self.mode,
+            "stage": dict(self.stage) if self.stage is not None else None,
             "ratios": {
                 "random": float(self.ratios[0]),
                 "current": float(self.ratios[1]),
@@ -463,6 +519,8 @@ class SelfPlayOpponentPool:
             shutil.copyfile(entry["path"], directory / filename)
             snapshots.append({**entry, "path": filename, "sha256": digest})
         _atomic_json(directory / "state.json", {
+            "mode": self.mode,
+            "stage": self.stage, "stage_recent_results": list(self.stage_recent_results),
             "snapshots": snapshots, "ratings": self.ratings,
             "learner_elo": self.learner_elo, "learner_generation": self.learner_generation,
             "aggregate": self.aggregate, "recent_results": list(self.recent_results),
@@ -475,6 +533,8 @@ class SelfPlayOpponentPool:
     def restore_state(self, directory):
         directory = Path(directory)
         saved = json.loads((directory / "state.json").read_text())
+        if saved.get("mode", "league") != self.mode:
+            raise ValueError("resume self-play mode changed")
         snapshot_ids = set()
         for entry in saved["snapshots"]:
             _validate_snapshot_id(entry["id"])
@@ -501,6 +561,8 @@ class SelfPlayOpponentPool:
         self.learner_generation = saved["learner_generation"]
         self.aggregate = saved["aggregate"]
         self.recent_results = deque(saved["recent_results"], maxlen=100)
+        self.stage = saved.get("stage")
+        self.stage_recent_results = deque(saved.get("stage_recent_results", []), maxlen=100)
         self.matchups.clear()
         self.matchups.update({(learner, opponent): values
                              for learner, opponent, values in saved["matchups"]})
@@ -530,6 +592,8 @@ class SelfPlayOpponentPool:
             self.root / "pool.json",
             {
                 "version": 1,
+                "mode": self.mode,
+                "stage": self.stage,
                 "updated_at": _timestamp(),
                 "learner_generation": self.learner_generation,
                 "learner_elo": round(self.learner_elo, 3),
@@ -596,6 +660,7 @@ class SelfPlaySnapshotCallback(BaseCallback):
         self.pool.set_learner_generation(completed)
         if completed > 0 and completed % self.every_rounds == 0:
             self.save_snapshot(completed)
+        self.pool.begin_stage()
 
     def _on_step(self):
         return True
@@ -605,6 +670,9 @@ class SelfPlaySnapshotCallback(BaseCallback):
             return
         completed = int(self.num_timesteps // self.rollout_decisions)
         self.pool.set_learner_generation(completed)
+        if self.pool.mode == "staged" and completed % self.every_rounds:
+            # An unfinished stage keeps its frozen opponent when resumed.
+            return
         self.save_snapshot(completed)
 
 

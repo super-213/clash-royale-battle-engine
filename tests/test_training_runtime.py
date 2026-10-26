@@ -154,6 +154,8 @@ class TrainingRuntimeTest(unittest.TestCase):
                 "native_engine.native_recurrent_model:NativeActionConditionedWorldModelPPO",
             )
             self.assertEqual(config["device"], "mps")
+            self.assertEqual(config["self_play_mode"], "staged")
+            self.assertEqual(config["self_play_snapshot_every_rounds"], 100)
             self.assertTrue(config["recurrent_enabled"])
             self.assertEqual(config["tbptt_steps"], 32)
             self.assertTrue(config["cross_modal_enabled"])
@@ -169,6 +171,27 @@ class TrainingRuntimeTest(unittest.TestCase):
             )
             self.assertEqual(status["status"], "dry_run_completed")
             self.assertEqual(Path(latest["run_dir"]), runs[0].resolve())
+
+    def test_stage_interval_is_configurable_in_both_launchers(self):
+        import train_native
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            one_click_train.main([
+                "--profile", "native_hybrid_ppo", "--defaults", "--dry-run",
+                "--runs-dir", str(root / "interactive"),
+                "--self-play-snapshot-every-rounds", "200",
+            ])
+            config_path = next((root / "interactive").glob("*/config.json"))
+            config = json.loads(config_path.read_text())
+            self.assertEqual(config["self_play_snapshot_every_rounds"], 200)
+            self.assertEqual(config["self_play_mode"], "staged")
+            train_native.main([
+                "--dry-run", "--output", str(root / "direct"),
+                "--self-play-snapshot-every-rounds", "1000",
+            ])
+            direct = json.loads((root / "direct/config.json").read_text())
+            self.assertEqual(direct["self_play_snapshot_every_rounds"], 1000)
 
     def test_cross_modal_dimension_must_be_divisible_by_heads(self):
         profile = one_click_train.load_profiles()[0]
@@ -327,8 +350,8 @@ class TrainingRuntimeTest(unittest.TestCase):
             status = json.loads((root / "status.json").read_text())
             self.assertEqual(status["status"], "completed")
 
-    def test_tiny_self_play_training_publishes_league_artifacts(self):
-        config = {
+    def self_play_config(self):
+        return {
             "rounds": 2,
             "rollout_decisions": 8,
             "battles": 2,
@@ -363,6 +386,9 @@ class TrainingRuntimeTest(unittest.TestCase):
             "self_play_loaded_model_limit": 2,
             "self_play_elo_k": 16.0,
         }
+
+    def test_tiny_self_play_training_publishes_league_artifacts(self):
+        config = self.self_play_config()
         with TemporaryDirectory() as directory:
             metadata = run_sb3_training(config, directory)
             root = Path(directory)
@@ -377,6 +403,38 @@ class TrainingRuntimeTest(unittest.TestCase):
             self.assertIn("## Recurrent memory", summary)
             self.assertTrue((root / "self_play" / "matches.jsonl").is_file())
             self.assertTrue((root / "charts" / "self_play_progress.svg").is_file())
+
+    def test_staged_training_switches_on_interval_and_resumes_an_unfinished_stage(self):
+        config = self.self_play_config()
+        config.update(rounds=5, self_play_mode="staged", self_play_snapshot_every_rounds=2)
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "first"
+            metadata = run_sb3_training(config, root)
+            pool = json.loads((root / "self_play/pool.json").read_text())
+            self.assertEqual([entry["round"] for entry in pool["snapshots"]], [0, 2, 4])
+            records = [json.loads(line) for line in (root / "metrics.jsonl").read_text().splitlines()]
+            self.assertEqual([r["self_play/stage_opponent_round"] for r in records], [0, 0, 2, 2, 4])
+            self.assertGreater(records[1]["self_play/stage_games"], records[0]["self_play/stage_games"])
+            self.assertLess(records[2]["self_play/stage_games"], records[1]["self_play/stage_games"])
+            self.assertGreater(records[3]["self_play/stage_games"], records[2]["self_play/stage_games"])
+            self.assertEqual(metadata["self_play"]["stage"]["opponent_round"], 4)
+            self.assertTrue((root / "charts/self_play_stages.svg").is_file())
+            matches = [json.loads(line) for line in (root / "self_play/matches.jsonl").read_text().splitlines()]
+            for generation, opponent in [(1, 0), (3, 2)]:
+                opponents = {m["opponent_id"] for m in matches
+                             if m["learner_id"] == f"learner_round_{generation:06d}"}
+                self.assertEqual(opponents, {f"snapshot_round_{opponent:06d}"})
+
+            resumed = json.loads((Path(str(root / "final_model.zip") + ".state") / "config.json").read_text())
+            resumed.update(rounds=7, resume_from=str(root / "final_model.zip"))
+            second = Path(directory) / "resumed"
+            result = run_sb3_training(resumed, second)
+            self.assertEqual(result["self_play"]["stage"]["opponent_round"], 6)
+            second_pool = json.loads((second / "self_play/pool.json").read_text())
+            self.assertEqual([entry["round"] for entry in second_pool["snapshots"]], [0, 2, 4, 6])
+            resumed_records = [json.loads(line) for line in (second / "metrics.jsonl").read_text().splitlines()]
+            self.assertEqual([r["self_play/stage_opponent_round"] for r in resumed_records], [4, 6])
+            self.assertGreater(resumed_records[0]["self_play/stage_games"], records[-1]["self_play/stage_games"])
 
 
 if __name__ == "__main__":

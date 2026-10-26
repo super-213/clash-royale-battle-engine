@@ -137,21 +137,28 @@ def prepare_config(profile, defaults_only=False):
     config["port"] = ask("原生引擎端口", config["port"], int, lambda value: 1 <= value <= 65535)
     config["checkpoint_every_rounds"] = ask("每多少轮保存检查点", config["checkpoint_every_rounds"], int, lambda value: value > 0)
     config["self_play_enabled"] = ask_yes_no(
-        "启用自博弈与历史对手池", config.get("self_play_enabled", True)
+        "启用自博弈", config.get("self_play_enabled", True)
     )
     if config["self_play_enabled"]:
+        config["self_play_mode"] = ask(
+            "自博弈模式（staged=分阶段固定对手，league=混合对手）",
+            config.get("self_play_mode", "league"), str,
+            lambda value: value in ("staged", "league"),
+        )
         config["self_play_snapshot_every_rounds"] = ask(
-            "每多少轮加入一个历史对手快照",
+            "每多少轮保存快照并更新固定对手" if config["self_play_mode"] == "staged"
+            else "每多少轮加入一个历史对手快照",
             config["self_play_snapshot_every_rounds"],
             int,
             lambda value: value > 0,
         )
-        config["self_play_pool_size"] = ask(
-            "历史对手池最大快照数",
-            config["self_play_pool_size"],
-            int,
-            lambda value: value > 0,
-        )
+        if config["self_play_mode"] == "league":
+            config["self_play_pool_size"] = ask(
+                "历史对手池最大快照数",
+                config["self_play_pool_size"],
+                int,
+                lambda value: value > 0,
+            )
     config["fixed_evaluation_enabled"] = ask_yes_no(
         "启用独立固定评估赛程", config.get("fixed_evaluation_enabled", True)
     )
@@ -230,7 +237,7 @@ def prepare_config(profile, defaults_only=False):
         config["gae_lambda"] = ask("GAE lambda", config["gae_lambda"], float, lambda value: 0 < value <= 1)
         config["entropy_coef"] = ask("熵系数", config["entropy_coef"], float, lambda value: value >= 0)
         config["clip_range"] = ask("PPO clip range", config["clip_range"], float, lambda value: value > 0)
-        if config.get("self_play_enabled"):
+        if config.get("self_play_enabled") and config.get("self_play_mode", "league") == "league":
             config["self_play_random_ratio"] = ask(
                 "随机对手比例", config["self_play_random_ratio"], float,
                 lambda value: 0 <= value <= 1,
@@ -300,6 +307,8 @@ def validate_config(config):
         if full_buffer % int(config["batch_size"]):
             raise ValueError("PPO batch_size 必须能整除每轮决策总数")
     if config.get("self_play_enabled"):
+        if config.get("self_play_mode", "league") not in {"staged", "league"}:
+            raise ValueError("self_play_mode must be staged or league")
         for key in ("self_play_snapshot_every_rounds", "self_play_pool_size",
                     "self_play_active_historical", "self_play_loaded_model_limit"):
             if int(config[key]) <= 0:
@@ -409,16 +418,20 @@ def print_plan(config, run_dir):
             f"{config['auxiliary_horizon'] * config['decision_ticks'] * 0.05:.2f}s"
         )
     if config.get("self_play_enabled"):
-        print(
-            "  自博弈对手 : "
-            f"随机 {config['self_play_random_ratio']:.0%} / "
-            f"当前 {config['self_play_current_ratio']:.0%} / "
-            f"历史 {config['self_play_historical_ratio']:.0%}"
-        )
-        print(
-            f"  对手池     : 每 {config['self_play_snapshot_every_rounds']} 轮快照，"
-            f"最多 {config['self_play_pool_size']} 个"
-        )
+        if config.get("self_play_mode", "league") == "staged":
+            print("  自博弈对手 : 分阶段固定对手，阶段内仅对战上一阶段冻结模型")
+            print(f"  阶段间隔   : 每 {config['self_play_snapshot_every_rounds']} 轮保存并切换对手")
+        else:
+            print(
+                "  自博弈对手 : "
+                f"随机 {config['self_play_random_ratio']:.0%} / "
+                f"当前 {config['self_play_current_ratio']:.0%} / "
+                f"历史 {config['self_play_historical_ratio']:.0%}"
+            )
+            print(
+                f"  对手池     : 每 {config['self_play_snapshot_every_rounds']} 轮快照，"
+                f"最多 {config['self_play_pool_size']} 个"
+            )
     if config.get("fixed_evaluation_enabled"):
         games = (
             config["evaluation_seed_count"] * 2
@@ -455,6 +468,9 @@ def main(argv=None):
     parser.add_argument("--experiment-suite", type=Path, help="execute a saved equal-budget experiment plan")
     parser.add_argument("--resume", type=Path, help="resume an updated checkpoint with its .zip.state bundle")
     parser.add_argument("--rounds", type=int, help="target total PPO rounds, including completed rounds")
+    parser.add_argument("--self-play-mode", choices=("staged", "league"))
+    parser.add_argument("--self-play-snapshot-every-rounds", type=int,
+                        help="rounds per frozen-opponent stage (or snapshot interval in league mode)")
     arguments = parser.parse_args(argv)
     if arguments.experiment_suite:
         from training_experiments import run_suite
@@ -475,6 +491,9 @@ def main(argv=None):
         config["run_name"] = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_resumed"
         if arguments.rounds is not None:
             config["rounds"] = arguments.rounds
+        for field in ("self_play_mode", "self_play_snapshot_every_rounds"):
+            if getattr(arguments, field) is not None:
+                config[field] = getattr(arguments, field)
         return launch_config(config, arguments)
     profiles = load_profiles()
     if arguments.profile:
@@ -489,6 +508,9 @@ def main(argv=None):
     config = prepare_config(profile, defaults_only=arguments.defaults)
     if arguments.rounds is not None:
         config["rounds"] = arguments.rounds
+    for field in ("self_play_mode", "self_play_snapshot_every_rounds"):
+        if getattr(arguments, field) is not None:
+            config[field] = getattr(arguments, field)
     return launch_config(config, arguments)
 
 

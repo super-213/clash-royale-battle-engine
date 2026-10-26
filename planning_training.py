@@ -275,7 +275,8 @@ def run_planning_training(config, run_dir):
                                    historical_ratio=config['self_play_historical_ratio'],
                                    snapshot_pool_size=config['self_play_pool_size'],
                                    active_historical=config['self_play_active_historical'],
-                                   loaded_model_limit=config['self_play_loaded_model_limit'], elo_k=config['self_play_elo_k'])
+                                   loaded_model_limit=config['self_play_loaded_model_limit'], elo_k=config['self_play_elo_k'],
+                                   mode=config.get('self_play_mode', 'league'))
         pool.set_current_model(agent)
     kwargs = dict(config.get('environment_kwargs', {}))
     kwargs.update(battles=config['battles'], port=config['port'], seed=config['seed'],

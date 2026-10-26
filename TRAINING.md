@@ -47,7 +47,7 @@ learner decisions，由 16 路原生 `VecEnv` 并行收集。交互流程会询�
 - MPS 或 CPU；
 - 原生引擎端口和检查点间隔；
 - 是否调整 rollout、minibatch、epochs、学习率、Gamma、GAE、熵系数和 clip。
-- 是否启用自博弈、历史快照间隔和对手池大小。
+- 是否启用自博弈、分阶段固定对手或混合联赛，以及快照/阶段间隔。
 - 是否调整 TBPTT 序列长度、持续 LSTM hidden size 和层数。
 - 是否调整 cross-attention token 维度、头数和实体 Transformer 层数。
 - 是否调整全分辨率 CNN feature channels。
@@ -58,6 +58,45 @@ learner decisions，由 16 路原生 `VecEnv` 并行收集。交互流程会询�
 APK 和 probe 的 ARM64 模拟器。冷启动后若 probe 尚未加载，它会使用模拟器内已有的
 `/data/local/tmp/frida-server-*` 注入匹配的已安装 probe。脚本只启动已有 AVD，
 不会创建 AVD 或安装 APK。
+
+## 分阶段固定对手自博弈
+
+默认 PPO profile 使用 `self_play_mode: "staged"`。设阶段间隔为 N：第 1～N 轮
+只对战初始冻结模型；第 N 轮完成 PPO 更新后保存模型，第 N+1～2N 轮的新对局
+只对战第 N 轮的冻结模型，之后重复。阶段按轮数切换，不增加胜率晋级门槛。
+
+`self_play_snapshot_every_rounds` 是可配置的 N，默认值为 100。交互启动时填写
+“每多少轮保存快照并更新固定对手”，也可直接传参，例如：
+
+```bash
+./train.sh --profile native_hybrid_ppo --defaults --rounds 1000 --self-play-snapshot-every-rounds 200
+conda run -n clash-royale python train_native.py --rounds 3000 --self-play-snapshot-every-rounds 1000 --output artifacts/staged_1000
+```
+
+配置文件位于 `training_profiles/native_hybrid_ppo.json` 的 `defaults` 中：
+
+```json
+"self_play_mode": "staged",
+"self_play_snapshot_every_rounds": 200
+```
+
+阶段间隔与 `checkpoint_every_rounds`（保存续训检查点）以及
+`evaluation_every_rounds`（独立固定评估）分别配置。阶段模式只使用最新冻结快照，
+不混入实时 learner、随机策略或其他历史快照；所有阶段快照保留，不按 Elo 淘汰。
+已经开始的比赛继续使用原对手直至结束，新比赛再使用新快照。
+
+`metrics.csv` / `metrics.jsonl` 和终端新增 `self_play/stage_*` 指标。
+其中 `stage_opponent_round` 是冻结对手轮次，`stage_games` 是该阶段已完成局数，
+`stage_win_rate` 是阶段累计胜率，`stage_win_rate_100` / `stage_score_rate_100`
+是阶段内最近 100 局胜率/得分率。阶段切换后重新计数，旧对手的收尾比赛仍计入
+全局统计，但不会计入新阶段。查看 `charts/self_play_stages.svg` 判断段内趋势；
+`self_play/matches.jsonl` 同时记录真实对手和当前阶段对手。
+
+未满 N 轮结束时依然保存最终模型和续训状态，但不会提前发布额外的阶段快照；
+续训保留原固定对手，达到下一个 N 的整数倍时再切换。续训配置仍使用检查点保存的
+模式和间隔；旧检查点没有 `self_play_mode` 时继续使用原混合联赛。
+原混合模式可通过 `--self-play-mode league` 选择，并按配置的随机/当前/历史比例采样。
+这些比例以及历史池容量、活跃历史对手数仅在混合模式下生效。
 
 ## 实时状态与产物
 
@@ -86,6 +125,7 @@ APK 和 probe 的 ARM64 模拟器。冷启动后若 probe 尚未加载，它会�
 | `self_play/matches.jsonl` | 每场自博弈的双方版本、角色、seed 和结果 |
 | `self_play/ratings.csv` | learner 与对手 Elo 的时间序列 |
 | `self_play/snapshots/*.zip` | 可复现的不可变历史对手模型 |
+| `charts/self_play_stages.svg` | 分阶段固定对手胜率、得分率和冻结对手轮次 |
 | `evaluation/schedule.json` | 固定 seed、双角色、冻结对手和评估间隔 |
 | `evaluation/matches.jsonl` | 每场独立评估的版本、seed、角色、结果、皇冠差和塔血差 |
 | `evaluation/summary.csv` | 每轮按对手及 aggregate 汇总的胜率、得分率和局面指标 |

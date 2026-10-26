@@ -63,6 +63,11 @@ METRIC_COLUMNS = (
     "self_play/score_rate_100",
     "self_play/learner_elo",
     "self_play/snapshot_count",
+    "self_play/stage_opponent_round",
+    "self_play/stage_games",
+    "self_play/stage_win_rate",
+    "self_play/stage_win_rate_100",
+    "self_play/stage_score_rate_100",
     "eval/round",
     "eval/games",
     "eval/win_rate",
@@ -396,6 +401,12 @@ class TrainingTelemetryCallback(BaseCallback):
                 f"win100={record.get('self_play/win_rate_100')} "
                 f"elo={record.get('self_play/learner_elo'):.1f}"
             )
+        if record.get("self_play/stage_opponent_round") is not None:
+            self_play += (
+                f" stage_opponent_round={record['self_play/stage_opponent_round']}"
+                f" stage_games={record['self_play/stage_games']}"
+                f" stage_win100={record.get('self_play/stage_win_rate_100')}"
+            )
         evaluation = ""
         if record.get("eval/games") is not None:
             evaluation = (
@@ -416,6 +427,13 @@ class TrainingTelemetryCallback(BaseCallback):
 
     def _on_rollout_end(self):
         self.last_rollout_metrics = {}
+        if self.metrics_provider is not None:
+            # The next rollout may publish a new opponent before _record runs.
+            # Attribute this completed rollout to the stage it actually played.
+            self.last_rollout_metrics.update({
+                key: value for key, value in self.metrics_provider().items()
+                if key.startswith("self_play/stage_")
+            })
         if self.exploration:
             values = np.concatenate(self.exploration).mean(axis=0)
             names = ("slot_entropy", "position_entropy", "wait_probability", "wait_rate",
@@ -596,6 +614,18 @@ def generate_charts(run_dir, records):
             ("historical snapshots", ("self_play/snapshot_count",)),
         ),
     )
+    if any(record.get("self_play/stage_opponent_round") is not None for record in records):
+        write_chart_svg(
+            charts / "self_play_stages.svg",
+            "Frozen-opponent stage progress",
+            records,
+            (
+                ("stage win rate (last 100)", ("self_play/stage_win_rate_100",)),
+                ("stage score rate (last 100)", ("self_play/stage_score_rate_100",)),
+                ("stage win rate (all stage games)", ("self_play/stage_win_rate",)),
+                ("frozen opponent round", ("self_play/stage_opponent_round",)),
+            ),
+        )
     return tuple(sorted(charts.glob("*.svg")))
 
 
@@ -757,6 +787,7 @@ def _write_summary_markdown(path, metadata, run_dir):
         lines.extend((
             "## Self-play",
             "",
+            f"- Mode: `{self_play.get('mode', 'league')}`",
             f"- Games: `{self_play['self_play/games']}`",
             f"- Wins/losses/draws: `{self_play['self_play/wins']}` / `{self_play['self_play/losses']}` / `{self_play['self_play/draws']}`",
             f"- Recent win rate: `{self_play['self_play/win_rate_100']}`",
@@ -764,6 +795,15 @@ def _write_summary_markdown(path, metadata, run_dir):
             f"- Snapshots: `{self_play['self_play/snapshot_count']}`",
             "",
         ))
+        if self_play.get("stage") is not None:
+            stage = self_play["stage"]
+            lines.extend((
+                f"- Stage opponent: `{stage['opponent_id']}`",
+                f"- Stage games: `{stage['games']}`",
+                f"- Stage win rate: `{self_play['self_play/stage_win_rate']}`",
+                f"- Stage recent win rate: `{self_play['self_play/stage_win_rate_100']}`",
+                "",
+            ))
     if "recurrent" in metadata:
         recurrent = metadata["recurrent"]
         lines.extend((
@@ -897,6 +937,7 @@ def _run_sb3_training(config, run_dir, resources):
             active_historical=int(config["self_play_active_historical"]),
             loaded_model_limit=int(config["self_play_loaded_model_limit"]),
             elo_k=float(config["self_play_elo_k"]),
+            mode=config.get("self_play_mode", "league"),
         )
     env_kwargs = dict(config.get("environment_kwargs", {}))
     env_kwargs.update(
